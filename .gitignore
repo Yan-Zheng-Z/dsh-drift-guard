@@ -1,0 +1,11 @@
+node_modules/
+
+# 插件的唯一产物：工作区内的提醒日志
+.drift/
+*.log
+
+# 测试运行时的临时沙箱（正常情况下会自行清理）
+test/.sandbox/
+
+# 夹具里那个空目录（由 test/smoke.mjs 运行时创建）
+test/fixtures/tmp/

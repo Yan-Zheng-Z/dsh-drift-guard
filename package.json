@@ -1,0 +1,32 @@
+{
+  "name": "dsh-drift-guard",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Deterministic drift guard for DSH: blocks writes outside the session workspace, reports writes outside the approved PLAN.md phases, and reports repeated identical tool failures.",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": {
+      "default": "./lib/index.js"
+    },
+    "./rules": {
+      "default": "./lib/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/index.js",
+    "README.md",
+    "LICENSE"
+  ],
+  "license": "MIT",
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "drift-guard"
+  ],
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "~4.0.4"
+  }
+}
