@@ -160,7 +160,9 @@ check(
 console.log('\n--- 回归：反斜杠路径与子目录会话 ---');
 check('反斜杠路径被当成一个 token', parsePlan('## 阶段 1 [已批准]\n- 新建 `deep\\a.py`：对齐\n')?.[0]?.status, 'deep/a.py');
 
-// 造一个嵌套工作区：会话 cwd 在下层目录，PLAN.md 里的路径按工作区根写。
+// 造一个嵌套工作区：PLAN.md 在父目录，会话 cwd 在下层子目录。
+// v0.2.2 起 inspectPlan 只在 cwd 里找 PLAN.md，所以下面既测 isApproved 的纯函数行为，
+// 也测"父目录有、工作区没有 → 必须 absent"这条行为收紧的反向用例。
 const nestedRoot = path.join(SANDBOX, 'nested');
 const nestedDeep = path.join(nestedRoot, 'deep');
 fs.mkdirSync(nestedDeep, { recursive: true });
@@ -178,15 +180,18 @@ check('待批准阶段不算', isApproved('c.py', nestedDeep, nestedPlan, nested
 check('目录条目下的文件命中', isApproved('tmp/build/out.o', nestedDeep, nestedPlan, nestedPlanDir), true);
 check('同名的别目录文件不算命中', isApproved('other/x.py', nestedDeep, nestedPlan, nestedPlanDir), false);
 
-// inspectPlan 走真实文件读取 + 缓存
+// inspectPlan 走真实文件读取 + 缓存（v0.2.2：只在会话工作区根目录找 PLAN.md）
 const planState = await inspectPlan({ get: () => undefined }, { cwd: nestedDeep, plan: null, planStamp: undefined });
-check('inspectPlan 读到计划', planState.status, 'ok');
-check('inspectPlan 从上层目录找到 PLAN.md', planState.file, path.join(nestedRoot, 'PLAN.md'));
-check('inspectPlan 带出条目解释根', planState.dir, nestedPlanDir);
-if (planState.status === 'ok') {
-  check('inspectPlan 的清单与解析一致', planState.approved.map((e) => e.status), nestedPlan.map((e) => e.status));
-  check('越界 c.py 仍被报出', classifyWrite({ name: 'write', cwd: nestedDeep, approved: planState.approved, planDir: planState.dir, args: { file_path: 'c.py' } })?.kind, 'unapproved');
-  check('已批准的 a.py 从 inspectPlan 结果也放行', classifyWrite({ name: 'write', cwd: nestedDeep, approved: planState.approved, planDir: planState.dir, args: { file_path: 'a.py' } }), null);
+check('工作区没有 PLAN.md、父目录有 → 仍是 absent', planState.status, 'absent');
+check('absent 时不带出计划文件', planState.file, undefined);
+// 同一份计划放在工作区根时照常解析：条目按工作区根解释。
+const rootState = await inspectPlan({ get: () => undefined }, { cwd: nestedRoot, plan: null, planStamp: undefined });
+check('计划放在工作区根时读到', rootState.status, 'ok');
+check('工作区根的计划清单与解析一致', rootState.approved?.map((e) => e.status), nestedPlan.map((e) => e.status));
+check('工作区根的计划带出解释根', rootState.dir, nestedRoot);
+if (rootState.status === 'ok') {
+  check('越界 c.py 仍被报出', classifyWrite({ name: 'write', cwd: nestedRoot, approved: rootState.approved, planDir: rootState.dir, args: { file_path: 'c.py' } })?.kind, 'unapproved');
+  check('已批准的 deep/a.py 从 inspectPlan 结果也放行', classifyWrite({ name: 'write', cwd: nestedRoot, approved: rootState.approved, planDir: rootState.dir, args: { file_path: 'deep/a.py' } }), null);
 }
 
 // 有"已批准"阶段但一个路径都没解析出来 -> 必须是 unparsed，不能退化成空清单
