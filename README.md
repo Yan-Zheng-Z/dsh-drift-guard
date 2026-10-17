@@ -2,6 +2,10 @@
 
 给 DSH 用的确定性偏离检查插件。在模型执行工具调用时，按固定规则检查它有没有偏离"已批准的计划"和"基本规则"，发现问题就记录下来、按级别提醒，必要时拦住那一次调用。
 
+## v0.3.1
+
+- **修复 S6 的日志行**：`alertLine` 原先没有 s6 分支，S6 触发时 `.drift/alerts.log` 与 `/drift` 的提醒列表会写成“未知提醒类型：s6”。改为按 `SIGNAL_NAME` 回落，并新增“所有已命名信号都不落未知”的断言，以后新增信号不会重犯。提醒正文一直正常。
+
 ## v0.3.0
 
 - **S6 漫游信号**：连续 12 次工具调用既没成功写文件、也没推进计划或 todo 就提醒；成功写入、`PLAN.md` 勾选数或 todo 完成数增加、收到真实用户消息都会清零。它**不计入**"≥2 个信号 → 第 3 级"的计数，触发期间压住 S4，没有 `PLAN.md` 时也照常生效。
@@ -139,7 +143,7 @@ R = r · [ (C − C₀) · N + D · L · C ] / H
 
 ```
 github:YAN-ZHENG-Z/dsh-drift-guard          # 默认分支
-github:YAN-ZHENG-Z/dsh-drift-guard#v0.3.0   # 固定到某个 tag
+github:YAN-ZHENG-Z/dsh-drift-guard#v0.3.1   # 固定到某个 tag
 ```
 
 上面两行就是"添加插件"输入框里可以直接填的内容。`github:` 前缀不能省；`YAN-ZHENG-Z/dsh-drift-guard` 这种写法会被当成非法包名。用 tag 写法更稳：默认分支会随仓库更新，tag 固定住版本。仓库发布后请确认 tag 名与实际打的 tag 一致（`git tag` 查看）。
@@ -293,7 +297,7 @@ github:YAN-ZHENG-Z/dsh-drift-guard#v0.3.0   # 固定到某个 tag
 node --check lib/index.js     # 语法检查
 node test/smoke.mjs           # 纯函数冒烟测试（108 项）
 node test/signals.mjs         # S1–S4、S6 与 R 的判定、参数防御（170 项）
-node test/alerts.mjs          # 分级、冷却、R 门槛、交接判定、追加不改原文、tokenMeter 管线（173 项）
+node test/alerts.mjs          # 分级、冷却、R 门槛、交接判定、追加不改原文、tokenMeter 管线（175 项）
 node test/sensitive.mjs       # 敏感拦截、放行、名单语义、glob pattern（111 项）
 ```
 

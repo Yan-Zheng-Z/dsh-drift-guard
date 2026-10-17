@@ -190,6 +190,8 @@ console.log('\n--- 记录与日志行 ---');
   check('日志文件里也是带级别的一行', log.includes('第1级 S3 重复读取'), true);
 }
 check('第 3 级的日志行', alertLine({ type: 'r', level: 3, count: 60, fact: '交接收益比 R ≈ 1.20（C ≈ 200000 token、N = 20、D = 0.00）', at: 0 }).includes('第3级 R 交接收益比：交接收益比 R ≈ 1.20'), true);
+check('S6 的日志行带级别与名称', alertLine({ type: 's6', level: 1, fact: '连续 12 次工具调用没有写入文件', at: 0 }).includes('第1级 S6 漫游调用：连续 12 次工具调用没有写入文件'), true);
+check('所有已命名信号都不落“未知提醒类型”', Object.keys(SIGNAL_NAME).filter((key) => alertLine({ type: key, level: 1, fact: 'x', at: 0 }).includes('未知提醒类型')), []);
 check('v0.1 的提醒行不带级别标签', alertLine({ type: 'unapproved', at: 0, tool: 'write', target: 'b.py', relative: 'b.py' }).includes('第'), false);
 
 console.log('\n--- 端到端：真实命中 → 选级 → 拼出追加块 ---');

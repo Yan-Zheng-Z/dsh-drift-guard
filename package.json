@@ -1,6 +1,6 @@
 {
   "name": "dsh-drift-guard",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "private": true,
   "description": "Deterministic drift guard for DSH: blocks writes outside the session workspace and reads of sensitive credential files, reports writes outside the approved PLAN.md phases, and appends leveled drift reminders (S1-S4 + S6 roam + handoff-ratio R) to tool results, with handoff completion detection.",
   "type": "module",
