@@ -132,6 +132,15 @@ const callB = { tool: 'edit', args: { file_path: 'b.py' }, result: ok('b') };
   check('阈值 4 时第 6 次不触发', seq[5], []);
   check('阈值 4 时第 8 次触发', seq[7], ['s2:4']);
 }
+{
+  // 交替被打断后，新的一段要按自己的阈值重新提醒，而不是要凑到 2 倍阈值。
+  const signals = createSignalState();
+  const breaker = { tool: 'read', args: { file_path: 'c.py' }, result: ok('c') };
+  const pattern = [callA, callB, callA, callB, breaker, callA, callB, callA, callB];
+  const seq = pattern.map((call) => flags(observeCall(signals, call, { ...BASE, s2Alternations: 2 })));
+  check('第一段第 4 次触发', seq[3], ['s2:2']);
+  check('中断后新一段第 4 次再次触发', seq[8], ['s2:2']);
+}
 
 console.log('\n--- S3：同一文件未修改被重复读取 ---');
 const file = path.join(SANDBOX, 'reread.txt');
@@ -251,7 +260,23 @@ console.log('\n--- S4：PLAN.md 已打勾步骤数停滞 ---');
   check('没有 PLAN.md（checkedSteps 缺省）时 S4 不触发', hasSignal(seq, 's4'), false);
 }
 {
-  // 有 todo 快照时 S4 盯 todo 的 completed，不再看 PLAN.md 的勾选数。
+  // 计划已全部勾完（planComplete）且没有 todo 进度源：没有应该继续增加的步骤，S4 不报停滞。
+  const signals = createSignalState();
+  const seq = [];
+  for (let i = 0; i < 30; i += 1) {
+    seq.push(flags(observeCall(signals, {
+      tool: 'write',
+      args: { file_path: `done-${i}.py` },
+      result: ok(`done${i}`),
+      checkedSteps: 5,
+      uncheckedSteps: 0,
+      planComplete: true,
+    }, BASE)));
+  }
+  check('计划全部完成时 S4 不触发', hasSignal(seq, 's4'), false);
+}
+{
+  // 有 todo 快照时 S4 优先看 todo；PLAN.md 的进展也参与“是否推进”的判断。
   const signals = createSignalState();
   let seq = 0;
   const call = (completed) => {
@@ -282,6 +307,40 @@ console.log('\n--- S4：PLAN.md 已打勾步骤数停滞 ---');
   const s4 = hits.find((hit) => hit.signal === 's4');
   check('todo 源的 S4 带 source 与 progress', [s4.source, s4.progress], ['todo', 1]);
   check('todo 源的 S4 文案写明 todo 完成数', signalText(s4).includes('todo 清单完成数（1 条）'), true);
+}
+{
+  // PLAN 在推进、todo 不动：任一源有进展都算推进，S4 不报停滞。
+  const signals = createSignalState();
+  const hits = [];
+  for (let i = 0; i < 25; i += 1) {
+    hits.push(flags(observeCall(signals, {
+      tool: 'read',
+      args: { file_path: `dual-${i}.txt` },
+      result: ok(`w${i}`),
+      checkedSteps: i,
+      uncheckedSteps: 5,
+      todo: { completed: 5, pending: 2, inProgress: 0 },
+      todoUsable: true,
+    }, BASE)));
+  }
+  check('PLAN 有进展、todo 不动时 S4 不触发', hasSignal(hits, 's4'), false);
+}
+{
+  // 两个源都不动：仍然是停滞。
+  const signals = createSignalState();
+  const hits = [];
+  for (let i = 0; i < 25; i += 1) {
+    hits.push(flags(observeCall(signals, {
+      tool: 'read',
+      args: { file_path: `dual-stall-${i}.txt` },
+      result: ok(`x${i}`),
+      checkedSteps: 5,
+      uncheckedSteps: 5,
+      todo: { completed: 5, pending: 2, inProgress: 0 },
+      todoUsable: true,
+    }, BASE)));
+  }
+  check('两个源都不动时 S4 仍触发', hasSignal(hits, 's4'), true);
 }
 check('countCheckedSteps 只数已打勾的列表条目', countCheckedSteps([
   '- [x] 已完成的步骤',
@@ -639,6 +698,9 @@ console.log('\n--- R：C 的取值与 N 的兜底 ---');
   check('todo 全部完成时 N = 0', [handoffRatio({ calls: 40, deltas: {}, todo: { completed: 4, pending: 0, inProgress: 0 } }).N, handoffRatio({ calls: 40, deltas: {}, todo: { completed: 4, pending: 0, inProgress: 0 } }).nSource], [0, 'todo']);
   check('todo 优先于 PLAN.md 的步数与 planComplete', handoffRatio({ calls: 40, deltas: {}, todo, checkedSteps: 10, uncheckedSteps: 99, planComplete: true }).N, 30);
   check('todo 字段非法时回退 PLAN.md', [handoffRatio({ calls: 40, deltas: {}, todo: { completed: 'x', pending: 1, inProgress: 0 }, checkedSteps: 2, uncheckedSteps: 6 }).N, handoffRatio({ calls: 40, deltas: {}, todo: { completed: 'x', pending: 1, inProgress: 0 }, checkedSteps: 2, uncheckedSteps: 6 }).nSource], [120, 'plan']);
+  check('todo 只剩完成项、没有剩余时 N = 0（不是 defaultN）', [handoffRatio({ calls: 40, deltas: {}, todo: { completed: 1, pending: 0, inProgress: 0 } }).N, handoffRatio({ calls: 40, deltas: {}, todo: { completed: 1, pending: 0, inProgress: 0 } }).nSource], [0, 'todo']);
+  check('todo 不可用（陈旧）时回退 PLAN', [handoffRatio({ calls: 40, deltas: {}, todo: { completed: 1, pending: 2, inProgress: 1 }, todoUsable: false, checkedSteps: 2, uncheckedSteps: 4 }).N, handoffRatio({ calls: 40, deltas: {}, todo: { completed: 1, pending: 2, inProgress: 1 }, todoUsable: false, checkedSteps: 2, uncheckedSteps: 4 }).nSource], [80, 'plan']);
+  check('没有 PLAN 时旧 todo 仍然可用', [handoffRatio({ calls: 40, deltas: {}, todo: { completed: 2, pending: 2, inProgress: 0 } }).N, handoffRatio({ calls: 40, deltas: {}, todo: { completed: 2, pending: 2, inProgress: 0 } }).nSource], [40, 'todo']);
 }
 
 console.log('\n--- R：边界处理 ---');

@@ -856,6 +856,21 @@ console.log('\n--- S6：不进 ≥2 计数、压住 S4、真实用户消息清�
   check('S1 + S6 只算一个真信号 → 第 2 级', chooseReminder(withS6, [{ signal: 's1', count: 4 }], settings).level, 2);
 }
 {
+  // S6 漫游期间 S4 被压住不投递，也不应再抬高别的信号到第 3 级。
+  const settings = { ...BASE, s1Repeats: 4, s3Reads: 3, s4IdleCalls: 20, s6RoamCalls: 12, cooldownCalls: 10 };
+  const roaming = createSessionSignals();
+  roaming.signals.calls = 40;
+  roaming.signals.s3.count = 3;
+  roaming.signals.s4.count = 20;
+  roaming.signals.s6.count = 12;
+  check('S6 漫游时 S3 + 被压住的 S4 仍是第 1 级', chooseReminder(roaming, [{ signal: 's3', count: 3, tool: 'read', path: 'a' }], settings)?.level, 1);
+  const noRoam = createSessionSignals();
+  noRoam.signals.calls = 40;
+  noRoam.signals.s3.count = 3;
+  noRoam.signals.s4.count = 20;
+  check('S6 未触发时 S3 + S4 是第 3 级', chooseReminder(noRoam, [{ signal: 's3', count: 3, tool: 'read', path: 'a' }], settings)?.level, 3);
+}
+{
   // S6 触发期间 S4 的提醒被压住（两条判据嵌套，只说一次）。
   const settings = { ...BASE, s4IdleCalls: 20, s6RoamCalls: 12, cooldownCalls: 0 };
   const roaming = createSessionSignals();
@@ -874,6 +889,49 @@ console.log('\n--- S6：不进 ≥2 计数、压住 S4、真实用户消息清�
   check('S6 未触发时 S4 照常提醒', chooseReminder(idleOnly, [
     { signal: 's4', count: 20, source: 'plan', progress: 5 },
   ], settings).hit.signal, 's4');
+}
+{
+  // todo 快照的新鲜度：有 PLAN 可用时，太久没更新的 todo 回退 PLAN；没有 PLAN 时不丢。
+  const state = freshState();
+  const settings = { ...BASE, todoStaleCalls: 3, s4IdleCalls: 999, s6RoamCalls: 999, cooldownCalls: 10 };
+  let seq = 0;
+  const call = (extra) => {
+    seq += 1;
+    return trackCall(state, {
+      session: rootSession,
+      isMain: true,
+      tool: 'write',
+      args: { file_path: `fresh-${seq}.py` },
+      result: ok(`f${seq}`),
+      cwd: SANDBOX,
+      ...extra,
+    }, settings);
+  };
+  call({ todo: { completed: 1, pending: 2, inProgress: 1 } });
+  for (let i = 2; i <= 6; i += 1) call({ checkedSteps: i, uncheckedSteps: 5 });
+  const entry = state.bySession.get(rootSession);
+  check('todo 超过 todoStaleCalls 后不再采信', entry.todoIdle > 3, true);
+  check('陈旧 todo 时 N 回退 PLAN', entry.signals.ratio.nSource, 'plan');
+
+  const state2 = freshState();
+  const settings2 = { ...BASE, todoStaleCalls: 3, s4IdleCalls: 999, s6RoamCalls: 999, cooldownCalls: 10 };
+  let seq2 = 0;
+  const call2 = (extra) => {
+    seq2 += 1;
+    return trackCall(state2, {
+      session: rootSession,
+      isMain: true,
+      tool: 'write',
+      args: { file_path: `old-${seq2}.py` },
+      result: ok(`o${seq2}`),
+      cwd: SANDBOX,
+      ...extra,
+    }, settings2);
+  };
+  call2({ todo: { completed: 2, pending: 2, inProgress: 0 } });
+  for (let i = 2; i <= 6; i += 1) call2({});
+  const entry2 = state2.bySession.get(rootSession);
+  check('没有 PLAN 时旧 todo 仍然可用', entry2.signals.ratio.nSource, 'todo');
 }
 {
   // 真实用户消息（无 form）清零；插件自己的通知（form:'notice'）不清零。
