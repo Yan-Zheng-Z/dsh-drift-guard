@@ -1,8 +1,8 @@
 {
   "name": "dsh-drift-guard",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
-  "description": "Deterministic drift guard for DSH: blocks writes outside the session workspace, reports writes outside the approved PLAN.md phases, and reports repeated identical tool failures.",
+  "description": "Deterministic drift guard for DSH: blocks writes outside the session workspace and reads of sensitive credential files, reports writes outside the approved PLAN.md phases, and appends leveled drift reminders (S1-S4 + handoff-ratio R) to tool results.",
   "type": "module",
   "main": "lib/index.js",
   "exports": {
@@ -16,6 +16,12 @@
   },
   "files": [
     "lib/index.js",
+    "lib/config.js",
+    "lib/paths.js",
+    "lib/plan.js",
+    "lib/signals.js",
+    "lib/sensitive.js",
+    "lib/alerts.js",
     "README.md",
     "LICENSE"
   ],
@@ -27,6 +33,12 @@
     "drift-guard"
   ],
   "peerDependencies": {
-    "@deepseek-ai/cordis": "~4.0.4"
+    "@deepseek-ai/cordis": "~4.0.4",
+    "@deepseek-ai/schemastery": "^3.18.2"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/schemastery": {
+      "optional": true
+    }
   }
 }

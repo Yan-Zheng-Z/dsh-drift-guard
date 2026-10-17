@@ -1,0 +1,619 @@
+/**
+ * drift-guard v0.2 分级提醒测试：级别、冷却、最高级优先、追加不改原文、只记日志的几种情况。
+ * 运行：node test/alerts.mjs（任意目录都可运行；日志写在临时沙箱里）
+ */
+import {
+  apply,
+  createSessionSignals,
+  chooseReminder,
+  observeCall,
+  trackCall,
+  handoffRatio,
+  signalText,
+  reminderText,
+  forwardReminderText,
+  appendReminder,
+  appendTarget,
+  recordSignalAlert,
+  alertLine,
+  levelTag,
+  ratioReport,
+  formatDriftReport,
+  SIGNAL_NAME,
+  LEVEL_ADVICE,
+} from '../lib/index.js';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+
+const SANDBOX = fs.mkdtempSync(path.join(os.tmpdir(), 'drift-guard-alerts-'));
+let failures = 0;
+
+function check(label, actual, expected) {
+  const ok = JSON.stringify(actual) === JSON.stringify(expected);
+  if (!ok) failures += 1;
+  console.log(`${ok ? 'PASS' : 'FAIL'}  ${label}`);
+  if (!ok) console.log(`      期望 ${JSON.stringify(expected)}\n      实际 ${JSON.stringify(actual)}`);
+}
+
+const ok = (text) => ({ isError: false, content: [{ type: 'text', text }] });
+const BASE = {
+  s1Repeats: 4,
+  s2Alternations: 6,
+  s3Reads: 3,
+  s4IdleCalls: 20,
+  failureRepeats: 3,
+  cooldownCalls: 10,
+};
+
+console.log('--- 分级文案 ---');
+check('第 1 级提醒块（三行、带分隔线）', reminderText(1, SIGNAL_NAME.s3, 'read 已连续 3 次读取未修改的 a.py').split('\n'), [
+  '---',
+  '[drift-guard 第1级] S3 重复读取：read 已连续 3 次读取未修改的 a.py',
+  '建议：重新阅读 PLAN.md 和用户原始要求，确认方向后继续。',
+]);
+check('第 2 级建议是停下来汇报', LEVEL_ADVICE[2], '停下来向用户汇报：已尝试什么、卡在哪、新方案，等待用户决定。');
+check('第 3 级建议是写 PROGRESS.md 并提醒开新会话', LEVEL_ADVICE[3], '完成当前步骤后，按交接流程写 PROGRESS.md 并提醒用户开新会话。');
+check('级别缺失时标签为空串', levelTag(undefined), '');
+check('第 3 级提醒块里带信号名与事实', reminderText(3, SIGNAL_NAME.r, '交接收益比 R ≈ 1.20（C ≈ 200000 token、N = 20、D = 0.00）').split('\n')[1], '[drift-guard 第3级] R 交接收益比：交接收益比 R ≈ 1.20（C ≈ 200000 token、N = 20、D = 0.00）');
+
+console.log('\n--- 子智能体的第 3 级转交主会话时的文案 ---');
+{
+  // 第 3 级的建议（写 PROGRESS.md、让用户开新会话）是针对"自己打转"的主体说的；
+  // 转交给主会话时改成第 2 级的说法，并写明是哪个子智能体在打转。
+  const alert = { type: 's1', count: 4, tool: 'read', fact: '同一工具 + 相同参数 + 相同结果已连续 4 次（tool=read）' };
+  const forward = forwardReminderText(alert, 'sub-42').split('\n');
+  check('转交块是第 2 级', forward[1], '[drift-guard 第2级] 子智能体 sub-42 可能在打转：同一工具 + 相同参数 + 相同结果已连续 4 次（tool=read）');
+  check('转交块用第 2 级的建议', forward[2], `建议：${LEVEL_ADVICE[2]}`);
+  check('转交块里没有"交接/开新会话"的文案', [
+    forward.join('\n').includes('PROGRESS.md'),
+    forward.join('\n').includes('开新会话'),
+  ], [false, false]);
+  check('转交块里列出信号事实', forward[1].includes('连续 4 次'), true);
+  check('拿不到子智能体 id 时也说得通', forwardReminderText(alert, undefined).split('\n')[1], '[drift-guard 第2级] 某个子智能体（未记录 id）可能在打转：同一工具 + 相同参数 + 相同结果已连续 4 次（tool=read）');
+  check('主会话自己的第 3 级仍用原建议', reminderText(3, SIGNAL_NAME.s1, alert.fact).includes(LEVEL_ADVICE[3]), true);
+}
+
+console.log('\n--- 追加：只加一块、不动原文 ---');
+const original = [{ type: 'text', text: '工具结果原文' }];
+{
+  const appended = appendReminder(original, '提醒');
+  check('追加后长度 +1', appended.length, 2);
+  check('原块按同一引用保留', appended[0] === original[0], true);
+  check('原数组没被改动', original.length, 1);
+  check('追加的是文本块', appended[1], { type: 'text', text: '提醒' });
+}
+{
+  const downstreamContent = [{ type: 'text', text: '下游改过的内容' }];
+  const appended = appendTarget({ kind: 'accept', content: downstreamContent }, original, '提醒');
+  check('下游替换过 content 时追加到它后面', appended.map((block) => block.text), ['下游改过的内容', '提醒']);
+  check('下游的数组也没被改动', downstreamContent.length, 1);
+}
+check('下游没有给 content 时追加到原结果后面', appendTarget({ kind: 'accept' }, original, '提醒').map((block) => block.text), ['工具结果原文', '提醒']);
+
+console.log('\n--- 这几种情况只记日志、不追加 ---');
+check('结果已被 block', appendTarget({ kind: 'block', feedback: [] }, original, '提醒'), null);
+check('下游替换了 value（不能再给 content）', appendTarget({ kind: 'accept', value: { a: 1 } }, original, '提醒'), null);
+check('原结果的 content 不是数组（undefined）', appendTarget({ kind: 'accept' }, undefined, '提醒'), null);
+check('原结果的 content 不是数组（字符串）', appendTarget({ kind: 'accept' }, '文本', '提醒'), null);
+check('原结果的 content 不是数组（对象）', appendTarget({ kind: 'accept' }, { type: 'text' }, '提醒'), null);
+check('下游给的 content 不是数组', appendTarget({ kind: 'accept', content: '文本' }, original, '提醒'), null);
+check('下游没有返回决策', appendTarget(undefined, original, '提醒'), null);
+check('content 不是数组时追加助手也返回 null', appendReminder(undefined, '提醒'), null);
+
+console.log('\n--- 级别与冷却 ---');
+{
+  const entry = createSessionSignals();
+  entry.signals.calls = 3;
+  entry.signals.s3.count = 3;
+  const hit = { signal: 's3', count: 3, tool: 'read', path: 'a.py', target: 'a.py' };
+  check('首次触发是第 1 级', chooseReminder(entry, [hit], BASE)?.level, 1);
+  check('没有命中时什么都不选', chooseReminder(entry, [], BASE), null);
+  check('一次只选一条', Array.isArray(chooseReminder(entry, [hit], BASE)), false);
+  // 模拟投递后的簿记（index.js 的 noteReminder 做这件事，这里直接构造）
+  entry.reminders.s3.alerts = 1;
+  entry.reminders.s3.lastCall = 3;
+  entry.signals.calls = 8;
+  entry.signals.s3.count = 6;
+  check('冷却期内的再次触发不提醒', chooseReminder(entry, [{ ...hit, count: 6 }], BASE), null);
+  entry.signals.calls = 12;
+  check('差一次没走完冷却也不提醒', chooseReminder(entry, [{ ...hit, count: 6 }], BASE), null);
+  entry.signals.calls = 13;
+  check('冷却走完后是第 2 级', chooseReminder(entry, [{ ...hit, count: 6 }], BASE)?.level, 2);
+}
+{
+  const entry = createSessionSignals();
+  entry.signals.calls = 60;
+  check('R 恒为第 3 级', chooseReminder(entry, [{ signal: 'r', count: 60, ratio: { R: 1.2 } }], BASE)?.level, 3);
+}
+{
+  const entry = createSessionSignals();
+  entry.signals.calls = 20;
+  entry.signals.s1.count = 4;
+  entry.signals.s3.count = 3;
+  check('两个信号同时处于触发状态时升到第 3 级', chooseReminder(entry, [{ signal: 's3', count: 3, tool: 'read', path: 'a.py' }], BASE)?.level, 3);
+}
+{
+  const entry = createSessionSignals();
+  entry.signals.calls = 20;
+  entry.signals.s1.count = 4;
+  entry.signals.s3.count = 3;
+  const hits = [
+    { signal: 's1', count: 4, tool: 'write' },
+    { signal: 's3', count: 3, tool: 'read', path: 'a.py' },
+  ];
+  check('级别相同时按 r→s1 的顺序取', chooseReminder(entry, hits, BASE)?.hit.signal, 's3');
+}
+{
+  const entry = createSessionSignals();
+  entry.signals.calls = 20;
+  entry.signals.s3.count = 3;
+  const hits = [
+    { signal: 's3', count: 3, tool: 'read', path: 'a.py' },
+    { signal: 'r', count: 20, ratio: { R: 1.2 } },
+  ];
+  check('不同级别时取级别最高的', chooseReminder(entry, hits, BASE)?.hit.signal, 'r');
+}
+{
+  const entry = createSessionSignals();
+  entry.signals.calls = 20;
+  entry.signals.s1.count = 1;
+  entry.signals.s3.count = 3;
+  const hit = { signal: 's3', count: 3, tool: 'read', path: 'a.py' };
+  check('只有一个信号处于触发状态时是第 1 级', chooseReminder(entry, [hit], BASE)?.level, 1);
+}
+
+console.log('\n--- 记录与日志行 ---');
+{
+  const state = { cwd: SANDBOX, seen: new Set(), alerts: [], logBroken: false };
+  const alert = {
+    type: 's3',
+    level: 1,
+    count: 3,
+    tool: 'read',
+    path: 'a.py',
+    fact: 'read 已连续 3 次读取未修改的 a.py',
+    at: Date.now(),
+  };
+  check('记下一条提醒', recordSignalAlert(state, alert) === alert, true);
+  check('重复的同一条不再记', recordSignalAlert(state, alert), null);
+  const line = alertLine(state.alerts[0]);
+  check('日志行带级别、信号名与事实', [
+    line.includes('第1级'),
+    line.includes('S3 重复读取'),
+    line.includes('已连续 3 次读取未修改的 a.py'),
+  ], [true, true, true]);
+  const log = fs.readFileSync(path.join(SANDBOX, '.drift', 'alerts.log'), 'utf8');
+  check('日志文件里也是带级别的一行', log.includes('第1级 S3 重复读取'), true);
+}
+check('第 3 级的日志行', alertLine({ type: 'r', level: 3, count: 60, fact: '交接收益比 R ≈ 1.20（C ≈ 200000 token、N = 20、D = 0.00）', at: 0 }).includes('第3级 R 交接收益比：交接收益比 R ≈ 1.20'), true);
+check('v0.1 的提醒行不带级别标签', alertLine({ type: 'unapproved', at: 0, tool: 'write', target: 'b.py', relative: 'b.py' }).includes('第'), false);
+
+console.log('\n--- 端到端：真实命中 → 选级 → 拼出追加块 ---');
+{
+  const entry = createSessionSignals();
+  const file = path.join(SANDBOX, 'repeat.txt');
+  fs.writeFileSync(file, 'x\n');
+  let picked = null;
+  for (let i = 0; i < 3; i += 1) {
+    const hits = observeCall(entry.signals, { tool: 'read', args: { file_path: file }, result: ok(`第 ${i} 次`), cwd: SANDBOX }, BASE);
+    picked = chooseReminder(entry, hits, BASE) ?? picked;
+  }
+  check('真实的 S3 命中被选成第 1 级', [picked?.hit.signal, picked?.level], ['s3', 1]);
+  const block = reminderText(picked.level, SIGNAL_NAME[picked.hit.signal], signalText(picked.hit));
+  const appended = appendTarget({ kind: 'accept' }, [{ type: 'text', text: '原文' }], block);
+  check('追加块里带 S3 的名字与事实', [appended[0].text, appended[1].text.includes('S3 重复读取'), appended[1].text.includes('repeat.txt')], ['原文', true, true]);
+}
+
+console.log('\n--- 会话归属与投递（要求 1、2）---');
+const freshState = () => ({
+  cwd: SANDBOX,
+  seen: new Set(),
+  alerts: [],
+  logBroken: false,
+  bySession: new WeakMap(),
+  pendingMain: null,
+});
+const fakeSession = (id) => ({ id, header: { cwd: SANDBOX } });
+const rootSession = fakeSession('root');
+const childSession = fakeSession('child');
+{
+  // S1–S4 按会话分开计数：主会话读 2 次 + 子智能体读 1 次，谁都不该凑够自己的 3 次
+  const state = freshState();
+  const file = path.join(SANDBOX, 'shared.txt');
+  fs.writeFileSync(file, 's\n');
+  const mainCall = (i) => trackCall(state, { session: rootSession, isMain: true, tool: 'read', args: { file_path: file }, result: ok(`主 ${i}`), cwd: SANDBOX }, BASE);
+  const childCall = (i) => trackCall(state, { session: childSession, isMain: false, tool: 'read', args: { file_path: file }, result: ok(`子 ${i}`), cwd: SANDBOX }, BASE);
+  check('主会话读 2 次不触发', [mainCall(1), mainCall(2)], [null, null]);
+  check('子智能体读 1 次也不触发（计数按会话分开）', childCall(1), null);
+  check('主会话再读 1 次才凑够自己的第 3 次', mainCall(3)?.level, 1);
+}
+{
+  // R 只统计主会话自己的调用：子智能体的上下文规模不进主会话的账
+  const state = freshState();
+  const settings = { ...BASE, cooldownCalls: 99 };
+  let last = null;
+  for (let i = 0; i < 3; i += 1) {
+    last = trackCall(state, {
+      session: childSession, isMain: false, tool: 'write', args: { file_path: `c${i}.py` }, result: ok(`c${i}`), cwd: SANDBOX, contextTokens: 999999,
+    }, settings);
+  }
+  check('子智能体的高上下文不产生 R 提醒', last, null);
+  const mainCall = (i) => trackCall(state, {
+    session: rootSession, isMain: true, tool: 'write', args: { file_path: `m${i}.py` }, result: ok(`m${i}`), cwd: SANDBOX, contextTokens: 200000,
+  }, settings);
+  const first = mainCall(0);
+  check('主会话上下文到 200000 时（N = 20）触发 R（第 3 级）', [first?.alert.type, first?.level], ['r', 3]);
+  check('主会话的 R 构成留给了 /drift', [state.ratio.C, Math.round(state.ratio.N), state.ratio.R > 1], [200000, 20, true]);
+  check('子智能体那 3 次的上下文没有混进主会话的账', state.bySession.get(rootSession).signals.calls, 1);
+}
+{
+  // 第 3 级只追加到主会话：子智能体自己读 4 次同一文件，第 4 次 S1+S3 同时成立 -> 第 3 级
+  const state = freshState();
+  const file = path.join(SANDBOX, 'repeat2.txt');
+  fs.writeFileSync(file, 'r\n');
+  const childCall = () => trackCall(state, { session: childSession, isMain: false, tool: 'read', args: { file_path: file }, result: ok('同一份内容'), cwd: SANDBOX }, BASE);
+  const childSeq = [childCall(), childCall(), childCall(), childCall()];
+  check('子智能体第 3 次拿到第 1 级', childSeq[2]?.level, 1);
+  check('子智能体第 4 次的第 3 级不追加给它', childSeq[3], null);
+  check('第 3 级挂到主会话待投递', state.pendingMain?.level, 3);
+  const mainCall = trackCall(state, { session: rootSession, isMain: true, tool: 'write', args: { file_path: 'x.py' }, result: ok('x'), cwd: SANDBOX }, BASE);
+  check('主会话的下一次工具结果拿到挂起的第 3 级', [mainCall?.alert.type, mainCall?.level], ['s1', 3]);
+  check('挂起被消费掉', state.pendingMain, null);
+}
+
+console.log('\n--- 管线集成：子智能体的第 3 级如何转交到主会话 ---');
+{
+  /** 只够跑通插件的最小 ctx：把两个监听器与 /drift 命令收下来。 */
+  function fakeCtx() {
+    const listeners = {};
+    return {
+      listeners,
+      effect(generator) {
+        for (const registered of generator()) void registered;
+      },
+      on(name, handler) {
+        listeners[name] = handler;
+        return () => {};
+      },
+      commands: { register: () => () => {} },
+    };
+  }
+  const home = path.join(SANDBOX, 'forward');
+  fs.mkdirSync(home, { recursive: true });
+  const childFile = path.join(home, 'child-repeat.txt');
+  fs.writeFileSync(childFile, 'c\n');
+  const mainSession = { id: 'main', header: { cwd: home } };
+  // 子智能体在宿主里是主会话的派生会话（有 parent）；这一点决定了它算不算"主会话"
+  const childSession = { id: 'child', header: { cwd: home }, parent: mainSession };
+  const ctx = fakeCtx();
+  apply(ctx, { ...BASE, cooldownCalls: 1 });
+  const pre = ctx.listeners['tools/pre-execute'];
+  const post = ctx.listeners['tools/post-execute'];
+  const accept = async () => ({ kind: 'accept' });
+  const result = (text) => ({ isError: false, content: [{ type: 'text', text }] });
+  const childRead = { name: 'read', arguments: { file_path: childFile }, agent: { id: 'sub-42', session: childSession } };
+  const mainWrite = { name: 'write', arguments: { file_path: path.join(home, 'main.py') }, agent: { id: 'main-agent', session: mainSession } };
+
+  const childDecisions = [];
+  for (let i = 1; i <= 4; i += 1) {
+    await pre(childRead, accept);
+    // 结果内容必须完全相同，才轮到 S1（同参同结果）而不是每轮都算“新结果”
+    childDecisions.push(await post(childRead, result('每次读到的都是同一份内容'), accept));
+  }
+  check('子智能体第 3 次拿到第 1 级提醒', childDecisions[2].content?.length, 2);
+  check('子智能体自家触发的第 3 级不追加给它', childDecisions[3].content, undefined);
+
+  await pre(mainWrite, accept);
+  const mainDecision = await post(mainWrite, result('写入完成'), accept);
+  check('主会话的下一次工具结果收到转交提醒', mainDecision.content?.length, 2);
+  const line = mainDecision.content[1].text.split('\n');
+  check('转交文案是第 2 级且写明子智能体 id', line[1], `[drift-guard 第2级] 子智能体 sub-42 可能在打转：${signalText({ signal: 's1', count: 4, tool: 'read' })}`);
+  check('转交文案用第 2 级建议', line[2], `建议：${LEVEL_ADVICE[2]}`);
+  check('转交文案里没有"开新会话"', line.join('\n').includes('开新会话'), false);
+  check('主会话的写入结果原文保留', mainDecision.content[0].text, '写入完成');
+}
+
+console.log('\n--- 管线集成：注册真实监听器后，提醒如何落到工具结果上 ---');
+{
+  /** 只够跑通插件的最小 ctx：把两个监听器与 /drift 命令收下来。 */
+  function fakeCtx() {
+    const listeners = {};
+    return {
+      listeners,
+      effect(generator) {
+        // 迭代即执行 generator 里的 yield：注册监听器与命令。
+        for (const registered of generator()) void registered;
+      },
+      on(name, handler) {
+        listeners[name] = handler;
+        return () => {};
+      },
+      commands: { register: () => () => {} },
+    };
+  }
+  const home = path.join(SANDBOX, 'pipeline');
+  fs.mkdirSync(home, { recursive: true });
+  const file = path.join(home, 'repeat.txt');
+  fs.writeFileSync(file, 'p\n');
+  const session = { id: 'pipeline', header: { cwd: home } };
+  const ctx = fakeCtx();
+  apply(ctx, { ...BASE, cooldownCalls: 1 });
+  const pre = ctx.listeners['tools/pre-execute'];
+  const post = ctx.listeners['tools/post-execute'];
+  const exec = () => ({ name: 'read', arguments: { file_path: file }, agent: { session } });
+  const results = [];
+  for (let i = 1; i <= 9; i += 1) results.push({ isError: false, content: [{ type: 'text', text: `第 ${i} 次读到的内容` }] });
+  const accept = async () => ({ kind: 'accept' });
+
+  const decisions = [];
+  for (let i = 0; i < 5; i += 1) {
+    await pre(exec(), accept);
+    decisions.push(await post(exec(), results[i], accept));
+  }
+  check('前 2 次读取的结果原样返回', [decisions[0].content, decisions[1].content], [undefined, undefined]);
+  check('第 3 次读取在末尾追加一条提醒', decisions[2].content?.length, 2);
+  check('原文按同一引用保留', decisions[2].content[0] === results[2].content[0], true);
+  check('追加块的格式与级别', decisions[2].content[1].text.split('\n').slice(0, 2), [
+    '---',
+    '[drift-guard 第1级] S3 重复读取：read 已连续 3 次读取未修改的 repeat.txt',
+  ]);
+  check('第 4、5 次不再追加', [decisions[3].content, decisions[4].content], [undefined, undefined]);
+
+  await pre(exec(), accept);
+  const blocked = await post(exec(), results[5], async () => ({ kind: 'block', feedback: [{ type: 'text', text: '被下游拦下' }] }));
+  check('结果已被 block 时原决策原样返回', [blocked.kind, blocked.content], ['block', undefined]);
+
+  await pre(exec(), accept);
+  const odd = await post(exec(), { isError: false, content: '不是数组' }, accept);
+  check('content 不是数组时不追加', [odd.kind, odd.content], ['accept', undefined]);
+
+  const log = fs.readFileSync(path.join(home, '.drift', 'alerts.log'), 'utf8');
+  check('日志里记下了这两次提醒（带级别）', [
+    log.includes('第1级 S3 重复读取'),
+    log.includes('第2级 S3 重复读取'),
+  ], [true, true]);
+}
+
+console.log('\n--- 管线集成：R 用主会话的 tokenMeter，拿不到时按调用次数估算 ---');
+{
+  /** 最小 ctx：两个监听器 + 一个可替换的 tokenMeter（用来模拟拿得到/拿不到计量）。 */
+  function fakeCtx(meter) {
+    const listeners = {};
+    const ctx = {
+      listeners,
+      effect(generator) {
+        for (const registered of generator()) void registered;
+      },
+      on(name, handler) {
+        listeners[name] = handler;
+        return () => {};
+      },
+      commands: { register: () => () => {} },
+    };
+    if (meter !== undefined) ctx.tokenMeter = meter;
+    return ctx;
+  }
+  const home = path.join(SANDBOX, 'tokens');
+  fs.mkdirSync(home, { recursive: true });
+  const accept = async () => ({ kind: 'accept' });
+  const okResult = (text) => ({ isError: false, content: [{ type: 'text', text }] });
+  /** 每个场景用**自己的会话与 ctx**：信号计数按会话累计，共用会把计数算歪。 */
+  function scene(id, config, meter) {
+    const session = { id, header: { cwd: home } };
+    const ctx = fakeCtx(meter);
+    apply(ctx, config);
+    return {
+      session,
+      write: { name: 'write', arguments: { file_path: path.join(home, `${id}.txt`) }, agent: { id: 'a', session } },
+      pre: ctx.listeners['tools/pre-execute'],
+      post: ctx.listeners['tools/post-execute'],
+    };
+  }
+
+  // 拿得到计量：C = 200000、N = 20（工作区里没有 PLAN.md）→ R = 1.2，第一次调用就够。
+  // cooldownCalls 设大，避免后续重复提醒干扰断言。
+  const measured = [];
+  const measuredScene = scene('token-main', { cooldownCalls: 99 }, {
+    measure: async (session) => {
+      measured.push(session === measuredScene.session);
+      return { totalTokens: 200000 };
+    },
+  });
+  await measuredScene.pre(measuredScene.write, accept);
+  const decision = await measuredScene.post(measuredScene.write, okResult('写入完成'), accept);
+  check('R ≥ 1 时追加第 3 级提醒', decision.content?.length, 2);
+  check('提醒块写的是 R 的构成', decision.content[1].text.includes('交接收益比 R ≈ 1.20（C ≈ 200000 token、N = 20、D = 0.00）'), true);
+  check('提醒块用第 3 级建议', decision.content[1].text.includes(LEVEL_ADVICE[3]), true);
+  check('tokenMeter 收到的是根会话', measured, [true]);
+
+  // 拿不到计量（服务缺失）：同一次调用只估到 C = 1500，远不到 R = 1。
+  const noMeter = scene('token-nometer', { cooldownCalls: 99 }, undefined);
+  await noMeter.pre(noMeter.write, accept);
+  const fallback = await noMeter.post(noMeter.write, okResult('写入完成'), accept);
+  check('拿不到 token 计量时第一次调用不触发（C = 1500 < C₀）', [fallback.kind, fallback.content], ['accept', undefined]);
+
+  // 回退估算：把 tokensPerCall 调大，同样的"拿不到计量"就应当触发，并注明 C 是估算值。
+  const estimated = scene('token-estimate', { handoffRatio: { tokensPerCall: 200000 }, cooldownCalls: 99 }, undefined);
+  await estimated.pre(estimated.write, accept);
+  const byEstimate = await estimated.post(estimated.write, okResult('写入完成'), accept);
+  check('按调用次数估算到 R ≥ 1 时触发', byEstimate.content?.length, 2);
+  check('估算出来的 C 会注明', byEstimate.content[1].text.includes('C ≈ 200000 token（估算）'), true);
+
+  // tokenMeter 抛异常：只记一条日志，工具结果照常返回（不追加、不断链）。
+  const brokenScene = scene('token-broken', { cooldownCalls: 99 }, {
+    measure: async () => { throw new Error('计量服务挂了'); },
+  });
+  await brokenScene.pre(brokenScene.write, accept);
+  const broken = await brokenScene.post(brokenScene.write, okResult('写入完成'), accept);
+  check('tokenMeter 抛异常时结果照常返回', [broken.kind, broken.content], ['accept', undefined]);
+  check('异常只记一条日志、不改结果', (() => {
+    const text = fs.readFileSync(path.join(home, '.drift', 'alerts.log'), 'utf8');
+    return text.includes('内部错误（tokenMeter）：计量服务挂了');
+  })(), true);
+
+  // 子智能体不算 R：计量不读它的、也不给它投递（即便它自己的估算早就够了）。
+  const parent = { id: 'token-parent', header: { cwd: home } };
+  const child = { id: 'token-child', header: { cwd: home }, parent };
+  const childMeasured = [];
+  const ctxChild = fakeCtx({
+    measure: async (session) => {
+      childMeasured.push(session === child);
+      return { totalTokens: 999999 };
+    },
+  });
+  apply(ctxChild, { handoffRatio: { tokensPerCall: 200000 }, cooldownCalls: 99 });
+  const preChild = ctxChild.listeners['tools/pre-execute'];
+  const postChild = ctxChild.listeners['tools/post-execute'];
+  const childWrite = {
+    name: 'write',
+    arguments: { file_path: path.join(home, 'child.txt') },
+    agent: { id: 'sub-1', session: child },
+  };
+  await preChild(childWrite, accept);
+  const childDecision = await postChild(childWrite, okResult('写入完成'), accept);
+  check('子智能体的 R 命中不投递给它', [childDecision.kind, childDecision.content], ['accept', undefined]);
+  check('也没有拿子智能体的 token 去凑 R（tokenMeter 里没有它）', childMeasured, []);
+}
+
+console.log('\n--- R 的再提醒门槛：固定倍增 1 → 2 → 4 → 8… ---');
+{
+  // 没有计划 → N = 20；R = (C − 20000) / 150000，所以 C = 20000 + 150000 × R。
+  // 硬上限调到极大，先只看倍增门槛。
+  const state = freshState();
+  const settings = { ...BASE, cooldownCalls: 1, handoffRatio: { capTokens: 100000000 } };
+  const call = (tokens) => trackCall(state, {
+    session: rootSession,
+    isMain: true,
+    tool: 'write',
+    args: { file_path: `ratio-${tokens}.py` },
+    result: ok(`r${tokens}`),
+    cwd: SANDBOX,
+    contextTokens: tokens,
+  }, settings);
+  const first = call(170000);
+  check('越过第 1 层（R = 1）时提醒', [first?.alert.type, first?.level], ['r', 3]);
+  check('不到第 2 层（R = 1.53）不提醒', call(250000), null);
+  check('差一点到第 2 层也不提醒', call(319999), null);
+  check('越过第 2 层（R = 2）时提醒', call(320000)?.alert.type, 'r');
+  check('不到第 3 层（R = 3.2）不提醒', call(500000), null);
+  check('越过第 3 层（R = 4）时提醒', call(620000)?.alert.type, 'r');
+  check('不到第 4 层（R = 6.53）不提醒', call(1000000), null);
+  check('越过第 4 层（R = 8）时提醒', call(1220000)?.alert.type, 'r');
+}
+{
+  // 门槛是"下一次要越过的固定层级"，不是"上次实际 R 的 2 倍"：
+  // 上一次在 R = 3.2 时提醒，下一次门槛就是 4（而不是 6.4）
+  const state = freshState();
+  const settings = { ...BASE, cooldownCalls: 1, handoffRatio: { capTokens: 100000000 } };
+  const call = (tokens) => trackCall(state, {
+    session: rootSession,
+    isMain: true,
+    tool: 'write',
+    args: { file_path: `ladder-${tokens}.py` },
+    result: ok(`l${tokens}`),
+    cwd: SANDBOX,
+    contextTokens: tokens,
+  }, settings);
+  call(170000); // R = 1 → 提醒，层级走到 1
+  check('R = 3.2 时提醒（越过第 2 层）', call(500000)?.alert.type, 'r');
+  check('层级记到 2（下次门槛是 4，不是 6.4）', state.bySession.get(rootSession).reminders.r.rTier, 2);
+  check('R = 4 就够（不是要 6.4）', call(620000)?.alert.type, 'r');
+  check('层级记到 3（下次门槛 8）', state.bySession.get(rootSession).reminders.r.rTier, 3);
+}
+{
+  // 硬上限只提醒一次，且纯上限提醒（R < 1）不推进倍增层级
+  const state = freshState();
+  const settings = { ...BASE, cooldownCalls: 1 };
+  const call = (tokens, steps) => trackCall(state, {
+    session: rootSession,
+    isMain: true,
+    tool: 'write',
+    args: { file_path: `cap-${tokens}.py` },
+    result: ok(`c${tokens}`),
+    cwd: SANDBOX,
+    contextTokens: tokens,
+    ...steps,
+  }, settings);
+  const noWork = { checkedSteps: 3, uncheckedSteps: 0 }; // N = 0 → R = 0，只剩硬上限
+  const first = call(600000, noWork);
+  check('硬上限首次触达单独提醒一次', [first?.alert.type, first?.alert.ratio.capped, first?.alert.ratio.R], ['r', true, 0]);
+  check('硬上限不再重复提醒', call(700000, noWork), null);
+  check('纯上限提醒不推进层级', state.bySession.get(rootSession).reminders.r.rTier, 0);
+  const byRatio = call(170000, undefined); // N = 20 → R = 1，属于越过第 1 层
+  check('纯硬上限提醒之后，R 越过第 1 层仍会提醒', byRatio?.alert.type, 'r');
+}
+{
+  // 硬上限与 R 同时到线：只投递一条，层级按这次的 R 推进
+  const state = freshState();
+  const settings = { ...BASE, cooldownCalls: 1 };
+  const call = (tokens) => trackCall(state, {
+    session: rootSession,
+    isMain: true,
+    tool: 'write',
+    args: { file_path: `both-${tokens}.py` },
+    result: ok(`b${tokens}`),
+    cwd: SANDBOX,
+    contextTokens: tokens,
+  }, settings);
+  const both = call(600000); // R = 3.867，同时撞上默认硬上限 600000
+  check('两条判据同时到线时只投递一条', [both?.alert.type, both?.alert.ratio.capped], ['r', true]);
+  const book = state.bySession.get(rootSession).reminders.r;
+  check('簿记里记下层级与"硬上限已提醒"', [book.rTier, book.capAlerted, book.alerts], [2, true, 1]);
+  check('下一次门槛是 4（R = 4.53 越过就提醒）', call(700000)?.alert.type, 'r');
+  check('再到下一层要 8（R = 6.53 不够）', call(1000000), null);
+  check('越过第 4 层后再提醒', call(1220000)?.alert.type, 'r');
+}
+{
+  // 单独验"硬上限只提醒一次"这道闸：造一条"R 远没到下一层、但 capped 为真"的命中
+  const entry = createSessionSignals();
+  entry.signals.calls = 100;
+  const hit = { signal: 'r', count: 100, ratio: { R: 5, capped: true, invalid: false } };
+  entry.reminders.r.rTier = 3; // 下一层是 8，R = 5 越不过去
+  check('硬上限还没提醒过时，R 没到下一层也放行', chooseReminder(entry, [hit], BASE)?.level, 3);
+  entry.reminders.r.capAlerted = true;
+  check('硬上限提醒过后，同一条命中被倍增门槛挡住', chooseReminder(entry, [hit], BASE), null);
+}
+{
+  // 冷却与硬上限的先后：冷却期内的上限提醒会被推迟，但不会丢掉（capAlerted 仍是 false）
+  const entry = createSessionSignals();
+  const hit = { signal: 'r', count: 12, ratio: { R: 0, capped: true, invalid: false } };
+  entry.signals.calls = 12;
+  entry.reminders.r.alerts = 1;
+  entry.reminders.r.lastCall = 12;
+  check('冷却期内的硬上限提醒先压住', chooseReminder(entry, [hit], BASE), null);
+  entry.signals.calls = 22;
+  check('冷却走完后这条上限提醒补上', chooseReminder(entry, [hit], BASE)?.level, 3);
+}
+
+console.log('\n--- /drift 报告里的 R 构成 ---');
+{
+  const book = { capAlerted: true, rTier: 3 }; // 已跨过 1、2、4 → 下次门槛 8
+  const ratio = handoffRatio({ tokens: 200000, calls: 40, deltas: { s2: 0 }, checkedSteps: 2, uncheckedSteps: 6 });
+  const lines = ratioReport(ratio, book);
+  check('第一行给出 R 与是否到线', lines[0], '交接收益比 R ≈ 7.53（R ≥ 1，已到交接条件）');
+  check('第二行给出 C 的来源与基线', lines[1], '  上下文 C ≈ 200000 token（来自 tokenMeter）／基线 C₀ = 20000');
+  check('第三行给出 N 与它的来源', lines[2], '  剩余工作量 N = 120（按 PLAN.md 未打勾项数外推）');
+  check('第四行给出 D 与各分量', lines[3], '  偏离强度 D = 1.00（S2 Δ=0 × 1.00）');
+  check('第五行给出参数与硬上限状态', lines[4], '  参数 r = 0.02、L = 5、H = 60000；硬上限 600000 token（未触达）');
+  check('第六行给出再提醒门槛', lines[5], '  再提醒门槛：硬上限已单独提醒过；下次要 R ≥ 8（固定倍增门槛：1 → 2 → 4 → 8…）');
+  check('估算的 C 会写明估算依据', ratioReport(handoffRatio({ calls: 40, deltas: {} }))[1].includes('按 40 次调用 × 1500 估算'), true);
+  check('没有数据时说明原因', ratioReport(null)[0], '交接收益比 R：本会话还没有工具调用，暂无数据。');
+  check('参数非法时写明原因', ratioReport({ invalid: true, reason: '参数 r 不是有限数（NaN）' })[0], '交接收益比 R：参数非法（参数 r 不是有限数（NaN）），R 的判定按"不触发"处理。');
+  check('撞硬上限时报告会标注已触达', ratioReport(handoffRatio({ tokens: 700000, calls: 1, deltas: {}, checkedSteps: 1, uncheckedSteps: 0 }))[4].includes('（已触达）'), true);
+}
+{
+  const state = freshState();
+  state.plan = { status: 'ok', approved: [{ status: 'a.py', isDir: false }] };
+  state.ratio = handoffRatio({ tokens: 200000, calls: 40, deltas: { s2: 0 }, checkedSteps: 2, uncheckedSteps: 6 });
+  const text = formatDriftReport(state, { capAlerted: false, rTier: 0 });
+  check('报告里插入 R 构成段', [text.includes('交接收益比 R ≈ 7.53'), text.includes('剩余工作量 N = 120'), text.includes('再提醒门槛：R 的判定还没提醒过，R ≥ 1 就提醒')], [true, true, true]);
+  check('报告里原来的部分还在', [text.includes('已批准清单'), text.includes('暂无提醒。')], [true, true]);
+  const empty = formatDriftReport(freshState());
+  check('没有额度数据时报告不崩、只说明暂无数据', empty.includes('交接收益比 R：本会话还没有工具调用，暂无数据。'), true);
+}
+
+fs.rmSync(SANDBOX, { recursive: true, force: true });
+
+console.log(`\n${failures === 0 ? '全部通过' : `${failures} 项失败`}`);
+process.exitCode = failures === 0 ? 0 : 1;

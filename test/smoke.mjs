@@ -25,7 +25,6 @@ import { fileURLToPath } from 'node:url';
 const TEST_DIR = path.dirname(fileURLToPath(import.meta.url));       // …/test
 const FIXTURES = path.join(TEST_DIR, 'fixtures');                    // …/test/fixtures
 const PLUGIN_DIR = path.dirname(TEST_DIR);                           // …/drift-guard
-const REPO_DIR = path.dirname(PLUGIN_DIR);                           // 插件所在仓库的根
 
 // 每次运行都新造一个临时沙箱，用完删掉；不写仓库、不依赖机器的目录结构。
 const SANDBOX = fs.mkdtempSync(path.join(os.tmpdir(), 'drift-guard-smoke-'));
@@ -198,10 +197,12 @@ const missingDir = makePlanDir('no-plan', '');
 fs.rmSync(path.join(missingDir, 'PLAN.md'));
 check('没有 PLAN.md 时状态是 absent', (await inspectPlan({ get: () => undefined }, { cwd: missingDir, plan: null, planStamp: undefined })).status, 'absent');
 
-// 仓库根没有 PLAN.md 时，规则 1 必须明确报"没有 PLAN.md"，而不是静默放行
-if (!fs.existsSync(path.join(REPO_DIR, 'PLAN.md'))) {
-  check('仓库根没有 PLAN.md 时状态是 absent', (await inspectPlan({ get: () => undefined }, { cwd: REPO_DIR, plan: null, planStamp: undefined })).status, 'absent');
-}
+// 没有 PLAN.md 的目录必须明确报"没有 PLAN.md"，而不是静默放行。
+// 场景在临时沙箱里自建，不看仓库根有没有 PLAN.md，所以这项断言确定执行（v0.2 起）；
+// 改成这样之前的写法带 `if (仓库根没有 PLAN.md)` 条件，工作区里一有 PLAN.md 就被跳过。
+const bareDir = path.join(SANDBOX, 'bare-no-plan');
+fs.mkdirSync(bareDir, { recursive: true });
+check('工作区没有 PLAN.md 时状态是 absent', (await inspectPlan({ get: () => undefined }, { cwd: bareDir, plan: null, planStamp: undefined })).status, 'absent');
 
 console.log('\n--- 夹具 PLAN.md ---');
 // 夹具是给人看的样例，测试直接读它，保证格式与解析器长期一致。
