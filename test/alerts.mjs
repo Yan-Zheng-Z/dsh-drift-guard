@@ -544,6 +544,23 @@ console.log('\n--- R 的再提醒门槛：固定倍增 1 → 2 → 4 → 8… --
   check('纯硬上限提醒之后，R 越过第 1 层仍会提醒', byRatio?.alert.type, 'r');
 }
 {
+  // planComplete 一路从 trackCall 传到 R：计划已全部完成时 N=0，C 再涨也不触发交接提醒。
+  const state = freshState();
+  const settings = { ...BASE, cooldownCalls: 1, handoffRatio: { capTokens: 100000000 } };
+  const call = (tokens) => trackCall(state, {
+    session: rootSession,
+    isMain: true,
+    tool: 'write',
+    args: { file_path: `complete-${tokens}.py` },
+    result: ok(`p${tokens}`),
+    cwd: SANDBOX,
+    contextTokens: tokens,
+    planComplete: true,
+  }, settings);
+  check('planComplete 传到 R：N = 0', [call(168755), state.ratio.N], [null, 0]);
+  check('planComplete 且无偏离时 R = 0，C 再涨也不提醒', [call(182158), state.ratio.R], [null, 0]);
+}
+{
   // 硬上限与 R 同时到线：只投递一条，层级按这次的 R 推进
   const state = freshState();
   const settings = { ...BASE, cooldownCalls: 1 };

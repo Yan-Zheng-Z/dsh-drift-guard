@@ -489,6 +489,13 @@ console.log('\n--- R：C 的取值与 N 的兜底 ---');
 
   check('没有计划时 N = 20', handoffRatio({ calls: 5, deltas: {} }).N, 20);
   check('有计划但一项都没打勾（算不出平均）时 N 用默认值', handoffRatio({ calls: 5, deltas: {}, checkedSteps: 0, uncheckedSteps: 8 }).N, 20);
+  check('planComplete 为 false 时仍取默认值', handoffRatio({ calls: 5, deltas: {}, planComplete: false }).N, 20);
+  const complete = handoffRatio({ calls: 100, tokens: 168755, deltas: {}, planComplete: true });
+  check('planComplete 时 N = 0（不再被默认值顶替）', complete.N, 0);
+  check('planComplete 时 nSource 记 plan', complete.nSource, 'plan');
+  check('planComplete 且无偏离时 R = 0', round(complete.R), 0);
+  check('同样的 C 下 N=20 会到 R≈0.99（对照）', round(handoffRatio({ calls: 100, tokens: 168755, deltas: {} }).R), 0.9917);
+  check('planComplete 时偏离项仍在 R 里', round(handoffRatio({ calls: 100, tokens: 168755, deltas: { s2: 0 }, planComplete: true }).R) > 0, true);
   check('defaultN 可配置', handoffRatio({ calls: 5, deltas: {}, settings: { handoffRatio: { defaultN: 7 } } }).N, 7);
 }
 

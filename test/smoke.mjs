@@ -196,7 +196,27 @@ if (rootState.status === 'ok') {
 
 // 有"已批准"阶段但一个路径都没解析出来 -> 必须是 unparsed，不能退化成空清单
 const emptyDir = makePlanDir('empty-plan', '# 计划\n\n## 阶段 1 [已批准]\n\n- 稍后补充细节\n');
-check('解析不到路径时是 unparsed（不静默放行）', (await inspectPlan({ get: () => undefined }, { cwd: emptyDir, plan: null, planStamp: undefined })).status, 'unparsed');
+const emptyState = await inspectPlan({ get: () => undefined }, { cwd: emptyDir, plan: null, planStamp: undefined });
+check('解析不到路径时是 unparsed（不静默放行）', emptyState.status, 'unparsed');
+check('解析不到路径时 missing 指出 path', emptyState.missing, ['path']);
+
+// 诊断字段：阶段下没有列表项 / 全部完成（文件合法，但没有可用的活动阶段）
+const noItemDir = makePlanDir('no-item', '# 计划\n\n## 阶段 1 [已批准]\n\n稍后补充细节\n');
+const noItemState = await inspectPlan({ get: () => undefined }, { cwd: noItemDir, plan: null, planStamp: undefined });
+check('阶段下没有列表项时是 unparsed', noItemState.status, 'unparsed');
+check('阶段下没有列表项时 missing 指出 list-item', noItemState.missing, ['list-item']);
+
+const allDoneDir = makePlanDir('all-done', '# 计划\n\n## 阶段 1 [已完成]\n\n- [x] 新建 `a.py`\n');
+const allDoneState = await inspectPlan({ get: () => undefined }, { cwd: allDoneDir, plan: null, planStamp: undefined });
+check('全部完成仍是 unparsed（规则 1 不生效）', allDoneState.status, 'unparsed');
+check('全部完成带出步数', [allDoneState.checkedSteps, allDoneState.uncheckedSteps], [1, 0]);
+check('全部完成标记 planComplete', allDoneState.planComplete, true);
+check('全部完成缺少的是活动阶段', allDoneState.missing, ['active-phase']);
+
+// 只用散文写、没有任何复选框的计划不能被当成"已全部完成"
+const proseDir = makePlanDir('prose-plan', '# 计划\n\n## 阶段 1 [已完成]\n\n这里只有文字说明。\n');
+const proseState = await inspectPlan({ get: () => undefined }, { cwd: proseDir, plan: null, planStamp: undefined });
+check('没有复选框时 planComplete 为 false', proseState.planComplete, false);
 
 const missingDir = makePlanDir('no-plan', '');
 fs.rmSync(path.join(missingDir, 'PLAN.md'));
@@ -236,7 +256,15 @@ function reportFor(plan) {
 }
 check('规则 1 生效时说明已解析', reportFor({ status: 'ok', approved }).includes('规则 1 生效'), true);
 check('规则 1 生效时列出清单', reportFor({ status: 'ok', approved }).includes('src/a.py'), true);
-check('解析不到计划时明确说明', reportFor({ status: 'unparsed', approved: null }).includes('未找到可解析的计划'), true);
+check('有 PLAN.md 但缺标记时不再报"未找到"', reportFor({ status: 'unparsed', approved: null }).includes('有 PLAN.md'), true);
+check('缺活动阶段时列出对应标记', reportFor({ status: 'unparsed', missing: ['active-phase'] }).includes('标题含「已批准」或「进行中」'), true);
+check('缺列表项时列出对应标记', reportFor({ status: 'unparsed', missing: ['list-item'] }).includes('至少一条列表项'), true);
+check('缺路径时列出对应标记', reportFor({ status: 'unparsed', missing: ['path'] }).includes('工作区相对路径'), true);
+check('格式不符与"没有 PLAN.md"是两句话', reportFor({ status: 'unparsed', missing: ['active-phase'] }).includes('没有 PLAN.md'), false);
+check('计划已全部完成时不叫格式不符', reportFor({ status: 'unparsed', planComplete: true, missing: ['active-phase'], checkedSteps: 3, uncheckedSteps: 0 }).includes('计划已全部完成'), true);
+check('全部完成那句不再说格式不符', reportFor({ status: 'unparsed', planComplete: true, missing: ['active-phase'] }).includes('格式不符'), false);
+check('有活动阶段但缺路径时不说"没有进行中阶段"', reportFor({ status: 'unparsed', planComplete: true, missing: ['path'] }).includes('没有「已批准/进行中」阶段'), false);
+check('文案里的规则范围包含规则 4/5', reportFor({ status: 'absent' }).includes('规则 2–5'), true);
 check('没有 PLAN.md 时明确说明', reportFor({ status: 'absent', approved: null }).includes('没有 PLAN.md'), true);
 check('无提醒时显示"暂无提醒"', reportFor({ status: 'absent', approved: null }).includes('暂无提醒'), true);
 check('没有会话工作区时不静默', reportFor({ status: 'no-cwd', approved: null }).includes('没有记录工作目录'), true);
