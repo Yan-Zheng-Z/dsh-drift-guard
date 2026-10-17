@@ -1,6 +1,6 @@
 {
   "name": "dsh-drift-guard",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "private": true,
   "description": "Deterministic drift guard for DSH: blocks writes outside the session workspace and reads of sensitive credential files, reports writes outside the approved PLAN.md phases, and appends leveled drift reminders (S1-S4 + handoff-ratio R) to tool results.",
   "type": "module",
@@ -15,6 +15,7 @@
     "./package.json": "./package.json"
   },
   "files": [
+    "cordis.patch.yml",
     "lib/index.js",
     "lib/config.js",
     "lib/paths.js",
@@ -32,6 +33,11 @@
     "deepseek-harness",
     "drift-guard"
   ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
   "peerDependencies": {
     "@deepseek-ai/cordis": "~4.0.4",
     "@deepseek-ai/schemastery": "^3.18.2"

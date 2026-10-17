@@ -2,6 +2,10 @@
 
 给 DSH 用的确定性偏离检查插件。在模型执行工具调用时，按固定规则检查它有没有偏离"已批准的计划"和"基本规则"，发现问题就记录下来、按级别提醒，必要时拦住那一次调用。
 
+## v0.2.1
+
+- **打包修复**：`package.json` 声明 `dsh.bundle.patch`，新增 `cordis.patch.yml`；界面“添加插件”可把本包作为组合包安装和管理。
+
 ## v0.2.0
 
 ### 新增
@@ -83,14 +87,16 @@ R = r · [ (C − C₀) · N + D · L · C ] / H
 
 界面安装由 plugin-manager 走 profile 的受管写入流程，**不需要手工改 `cordis.patch.yml` 或 `package.json`**。详见 [@deepseek-ai/dsh-plugin-manager 文档](https://www.npmjs.com/package/@deepseek-ai/dsh-plugin-manager) 的"添加插件"一节：它接受包名、Git 地址、压缩包或本地绝对路径。
 
+本包的 `package.json` 声明了 `dsh.bundle.patch`（指向 `cordis.patch.yml`），plugin-manager 会把它识别为组合包；界面安装、GitHub 安装和本地路径安装都依赖这个声明。
+
 ### 从 GitHub 安装（发布到仓库后）
 
 ```
-YAN-ZHENG-Z/dsh-drift-guard          # 默认分支
-YAN-ZHENG-Z/dsh-drift-guard#v0.2.0   # 固定到某个 tag
+github:YAN-ZHENG-Z/dsh-drift-guard          # 默认分支
+github:YAN-ZHENG-Z/dsh-drift-guard#v0.2.1   # 固定到某个 tag
 ```
 
-上面两行就是"添加插件"输入框里可以直接填的内容。用 tag 写法更稳：默认分支会随仓库更新，tag 固定住版本。仓库发布后请确认 tag 名与实际打的 tag 一致（`git tag` 查看）。
+上面两行就是"添加插件"输入框里可以直接填的内容。`github:` 前缀不能省；`YAN-ZHENG-Z/dsh-drift-guard` 这种写法会被当成非法包名。用 tag 写法更稳：默认分支会随仓库更新，tag 固定住版本。仓库发布后请确认 tag 名与实际打的 tag 一致（`git tag` 查看）。
 
 ### 手动安装（兜底，需要你确认后自行操作）
 
@@ -100,8 +106,9 @@ YAN-ZHENG-Z/dsh-drift-guard#v0.2.0   # 固定到某个 tag
 2. 在 `cordis.patch.yml` 末尾追加：
 
    ```yaml
-   - id: drift-guard
-     name: "D:\\dsh-plugins\\drift-guard"
+   - insert:
+       - id: drift-guard
+         name: "D:\\dsh-plugins\\drift-guard"
    ```
 
 3. 让插件包能被解析：把本目录放进该 profile 的依赖（`"dsh-drift-guard": "file:D:/dsh-plugins/drift-guard"`），或在 patch 里用上一步的绝对路径让 loader 直接加载。

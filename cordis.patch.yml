@@ -1,0 +1,5 @@
+# drift-guard 的组合包补丁：package.json 的 dsh.bundle.patch 指向本文件。
+# insert 一行，把包的主入口挂到 profile 层。
+- insert:
+    - id: drift-guard
+      name: dsh-drift-guard
