@@ -42,12 +42,13 @@ const flags = (hits) => hits.map((hit) => `${hit.signal}:${hit.count}`);
 /** 一串调用里是否出现过某个信号。 */
 const hasSignal = (seq, name) => seq.some((hit) => hit.some((flag) => flag.startsWith(`${name}:`)));
 
-/** 默认阈值；单个用例按需覆盖。 */
+/** 默认阈值；单个用例按需覆盖。S6 在大多数用例里关掉（阈值放到 999），免得它顺带命中。 */
 const BASE = {
   s1Repeats: 4,
   s2Alternations: 6,
   s3Reads: 3,
   s4IdleCalls: 20,
+  s6RoamCalls: 999,
   failureRepeats: 3,
   cooldownCalls: 10,
 };
@@ -249,6 +250,39 @@ console.log('\n--- S4：PLAN.md 已打勾步骤数停滞 ---');
   }
   check('没有 PLAN.md（checkedSteps 缺省）时 S4 不触发', hasSignal(seq, 's4'), false);
 }
+{
+  // 有 todo 快照时 S4 盯 todo 的 completed，不再看 PLAN.md 的勾选数。
+  const signals = createSignalState();
+  let seq = 0;
+  const call = (completed) => {
+    seq += 1;
+    return flags(observeCall(signals, {
+      tool: 'write',
+      args: { file_path: `todo-s4-${seq}.py` },
+      result: ok(`u${seq}`),
+      todo: { completed, pending: 2, inProgress: 1 },
+    }, BASE));
+  };
+  check('todo 基线那次不算停滞', call(2), []);
+  check('todo 连续 19 次未增加不触发', Array.from({ length: 19 }, () => call(2)).every((hit) => hit.length === 0), true);
+  check('todo 第 20 次未增加触发', call(2), ['s4:20']);
+  check('todo 完成数增加后清零', call(3), []);
+}
+{
+  const signals = createSignalState();
+  let hits;
+  for (let i = 0; i < 21; i += 1) {
+    hits = observeCall(signals, {
+      tool: 'write',
+      args: { file_path: `todo-source-${i}.py` },
+      result: ok(`v${i}`),
+      todo: { completed: 1, pending: 2, inProgress: 0 },
+    }, BASE);
+  }
+  const s4 = hits.find((hit) => hit.signal === 's4');
+  check('todo 源的 S4 带 source 与 progress', [s4.source, s4.progress], ['todo', 1]);
+  check('todo 源的 S4 文案写明 todo 完成数', signalText(s4).includes('todo 清单完成数（1 条）'), true);
+}
 check('countCheckedSteps 只数已打勾的列表条目', countCheckedSteps([
   '- [x] 已完成的步骤',
   '- [ ] 未完成的步骤',
@@ -259,6 +293,102 @@ check('countCheckedSteps 只数已打勾的列表条目', countCheckedSteps([
   '[x] 不是列表条目，不算',
 ].join('\n')), 5);
 check('空文本 0 步', countCheckedSteps(''), 0);
+
+console.log('\n--- S6：漫游调用（没写文件、没推进计划）---');
+{
+  // 阈值压到 5，一个用例里能走完"触发 → 再满阈值再提醒"。
+  const S6 = { ...BASE, s6RoamCalls: 5 };
+  const signals = createSignalState();
+  const roam = (i, extra = {}) => flags(observeCall(signals, {
+    tool: 'read',
+    args: { file_path: `roam-${i}.txt` },
+    result: ok(`第 ${i} 次`),
+    ...extra,
+  }, S6));
+
+  const before = [];
+  for (let i = 0; i < 4; i += 1) before.push(roam(i));
+  check('S6 前 4 次不触发', hasSignal(before, 's6'), false);
+  check('S6 第 5 次触发', roam(4), ['s6:5']);
+  check('S6 文案写明漫游次数', signalText({ signal: 's6', count: 5, tool: 'read' }).includes('连续 5 次工具调用没有写入文件'), true);
+  check('S6 触发后活跃序号记进 active', typeof signals.active.s6 === 'number', true);
+  check('S6 计入偏离强度 D（wS6）', deviationDeltas(signals).s6, 0);
+  const between = [];
+  for (let i = 0; i < 4; i += 1) between.push(roam(5 + i));
+  check('S6 未再满阈值时不重复提醒', hasSignal(between, 's6'), false);
+  check('S6 第 10 次再提醒', roam(9), ['s6:10']);
+}
+{
+  // 清零条件 1：成功写文件。
+  const S6 = { ...BASE, s6RoamCalls: 3 };
+  const signals = createSignalState();
+  for (let i = 0; i < 2; i += 1) observeCall(signals, { tool: 'read', args: { file_path: `w${i}` }, result: ok(`a${i}`) }, S6);
+  observeCall(signals, { tool: 'write', args: { file_path: 'x.txt' }, result: ok('写出去了'), wrote: true }, S6);
+  check('成功写文件后 S6 清零', signals.s6.count, 0);
+  const after = [];
+  for (let i = 0; i < 2; i += 1) after.push(flags(observeCall(signals, { tool: 'read', args: { file_path: `w${i}b` }, result: ok(`b${i}`) }, S6)));
+  check('清零后要重新数满阈值', hasSignal(after, 's6'), false);
+}
+{
+  // 清零条件 2：失败写入不算清零。
+  const S6 = { ...BASE, s6RoamCalls: 3 };
+  const signals = createSignalState();
+  observeCall(signals, { tool: 'read', args: { file_path: 'f1' }, result: ok('a') }, S6);
+  observeCall(signals, { tool: 'read', args: { file_path: 'f2' }, result: ok('b') }, S6);
+  observeCall(signals, { tool: 'write', args: { file_path: 'x.txt' }, result: bad('被拒绝'), wrote: false }, S6);
+  check('失败的写入不清零 S6', signals.s6.count, 3);
+}
+{
+  // 清零条件 3：PLAN.md 打勾数变大。
+  const S6 = { ...BASE, s6RoamCalls: 3 };
+  const signals = createSignalState();
+  const step = (i, checked) => flags(observeCall(signals, {
+    tool: 'read', args: { file_path: `p${i}` }, result: ok(`p${i}`), checkedSteps: checked,
+  }, S6));
+  step(1, 2);
+  step(2, 2);
+  check('勾选数没变仍在累计', signals.s6.count, 2);
+  step(3, 3);
+  check('勾选数变大后 S6 清零', signals.s6.count, 0);
+}
+{
+  // 清零条件 4：todo 完成数变大。
+  const S6 = { ...BASE, s6RoamCalls: 3 };
+  const signals = createSignalState();
+  const item = (i, completed) => flags(observeCall(signals, {
+    tool: 'read',
+    args: { file_path: `t${i}` },
+    result: ok(`t${i}`),
+    todo: { completed, pending: 1, inProgress: 0 },
+  }, S6));
+  item(1, 1);
+  item(2, 1);
+  check('todo 完成数没变仍在累计', signals.s6.count, 2);
+  item(3, 2);
+  check('todo 完成数变大后 S6 清零', signals.s6.count, 0);
+}
+{
+  // 没有 PLAN.md（checkedSteps 缺省）时 S6 照常生效——这是与 S4 的关键区别。
+  const S6 = { ...BASE, s6RoamCalls: 3 };
+  const signals = createSignalState();
+  const seq = [];
+  for (let i = 0; i < 3; i += 1) {
+    seq.push(flags(observeCall(signals, { tool: 'read', args: { file_path: `n${i}` }, result: ok(`n${i}`) }, S6)));
+  }
+  check('没有 PLAN.md 时 S6 照常触发', hasSignal(seq, 's6'), true);
+}
+{
+  // 一直写文件就不会漫游。
+  const S6 = { ...BASE, s6RoamCalls: 3 };
+  const signals = createSignalState();
+  const seq = [];
+  for (let i = 0; i < 6; i += 1) {
+    seq.push(flags(observeCall(signals, {
+      tool: 'write', args: { file_path: `w${i}.txt` }, result: ok(`w${i}`), wrote: true,
+    }, S6)));
+  }
+  check('连续写文件不触发 S6', hasSignal(seq, 's6'), false);
+}
 
 console.log('\n--- R：读不到 token 计量时按"调用次数 × 每次估算 token"折算 ---');
 {
@@ -497,6 +627,18 @@ console.log('\n--- R：C 的取值与 N 的兜底 ---');
   check('同样的 C 下 N=20 会到 R≈0.99（对照）', round(handoffRatio({ calls: 100, tokens: 168755, deltas: {} }).R), 0.9917);
   check('planComplete 时偏离项仍在 R 里', round(handoffRatio({ calls: 100, tokens: 168755, deltas: { s2: 0 }, planComplete: true }).R) > 0, true);
   check('defaultN 可配置', handoffRatio({ calls: 5, deltas: {}, settings: { handoffRatio: { defaultN: 7 } } }).N, 7);
+
+  // todo 源：N = (pending + in_progress) × calls / completed；completed < 2 时取默认值。
+  const todo = { completed: 4, pending: 2, inProgress: 1 };
+  const fromTodo = handoffRatio({ calls: 40, deltas: {}, todo });
+  check('todo 源：剩余 3 × 平均 10 = 30', [fromTodo.N, fromTodo.nSource], [30, 'todo']);
+  check('todo 源：报告里带出计数', fromTodo.todo, todo);
+  check('todo 源：completed = 2 时可用', handoffRatio({ calls: 40, deltas: {}, todo: { completed: 2, pending: 3, inProgress: 0 } }).N, 60);
+  check('todo 完成不足 2 条时取默认值', [handoffRatio({ calls: 40, deltas: {}, todo: { completed: 1, pending: 2, inProgress: 1 } }).N, handoffRatio({ calls: 40, deltas: {}, todo: { completed: 1, pending: 2, inProgress: 1 } }).nSource], [20, 'todo-low']);
+  check('todo 完成 0 条时取默认值', handoffRatio({ calls: 40, deltas: {}, todo: { completed: 0, pending: 2, inProgress: 1 } }).N, 20);
+  check('todo 全部完成时 N = 0', [handoffRatio({ calls: 40, deltas: {}, todo: { completed: 4, pending: 0, inProgress: 0 } }).N, handoffRatio({ calls: 40, deltas: {}, todo: { completed: 4, pending: 0, inProgress: 0 } }).nSource], [0, 'todo']);
+  check('todo 优先于 PLAN.md 的步数与 planComplete', handoffRatio({ calls: 40, deltas: {}, todo, checkedSteps: 10, uncheckedSteps: 99, planComplete: true }).N, 30);
+  check('todo 字段非法时回退 PLAN.md', [handoffRatio({ calls: 40, deltas: {}, todo: { completed: 'x', pending: 1, inProgress: 0 }, checkedSteps: 2, uncheckedSteps: 6 }).N, handoffRatio({ calls: 40, deltas: {}, todo: { completed: 'x', pending: 1, inProgress: 0 }, checkedSteps: 2, uncheckedSteps: 6 }).nSource], [120, 'plan']);
 }
 
 console.log('\n--- R：边界处理 ---');
@@ -520,6 +662,7 @@ check('默认参数与定下的口径一致', DEFAULTS.handoffRatio, {
   wS2: 1,
   wS3: 0.5,
   wS4: 1,
+  wS6: 1,
   defaultN: 20,
   tokensPerCall: 1500,
   capTokens: 600000,

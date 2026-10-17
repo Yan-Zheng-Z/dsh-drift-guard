@@ -1,8 +1,8 @@
 {
   "name": "dsh-drift-guard",
-  "version": "0.2.3",
+  "version": "0.3.0",
   "private": true,
-  "description": "Deterministic drift guard for DSH: blocks writes outside the session workspace and reads of sensitive credential files, reports writes outside the approved PLAN.md phases, and appends leveled drift reminders (S1-S4 + handoff-ratio R) to tool results.",
+  "description": "Deterministic drift guard for DSH: blocks writes outside the session workspace and reads of sensitive credential files, reports writes outside the approved PLAN.md phases, and appends leveled drift reminders (S1-S4 + S6 roam + handoff-ratio R) to tool results, with handoff completion detection.",
   "type": "module",
   "main": "lib/index.js",
   "exports": {
@@ -20,6 +20,7 @@
     "lib/config.js",
     "lib/paths.js",
     "lib/plan.js",
+    "lib/persist.js",
     "lib/signals.js",
     "lib/sensitive.js",
     "lib/alerts.js",

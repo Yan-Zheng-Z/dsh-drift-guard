@@ -18,9 +18,12 @@ import {
   alertLine,
   levelTag,
   ratioReport,
+  handoffReport,
   formatDriftReport,
+  stateOf,
   SIGNAL_NAME,
   LEVEL_ADVICE,
+  HANDOFF_TEMPLATE,
 } from '../lib/index.js';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -53,7 +56,7 @@ check('第 1 级提醒块（三行、带分隔线）', reminderText(1, SIGNAL_NA
   '建议：重新阅读 PLAN.md 和用户原始要求，确认方向后继续。',
 ]);
 check('第 2 级建议是停下来汇报', LEVEL_ADVICE[2], '停下来向用户汇报：已尝试什么、卡在哪、新方案，等待用户决定。');
-check('第 3 级建议是写 PROGRESS.md 并提醒开新会话', LEVEL_ADVICE[3], '完成当前步骤后，按交接流程写 PROGRESS.md 并提醒用户开新会话。');
+check('第 3 级建议是先告诉用户、等回复后再写', LEVEL_ADVICE[3], '先在本轮回复里明确告诉用户"建议现在交接"，等用户回复后再按交接流程写 PROGRESS.md。');
 check('级别缺失时标签为空串', levelTag(undefined), '');
 check('第 3 级提醒块里带信号名与事实', reminderText(3, SIGNAL_NAME.r, '交接收益比 R ≈ 1.20（C ≈ 200000 token、N = 20、D = 0.00）').split('\n')[1], '[drift-guard 第3级] R 交接收益比：交接收益比 R ≈ 1.20（C ≈ 200000 token、N = 20、D = 0.00）');
 
@@ -302,6 +305,8 @@ console.log('\n--- 管线集成：子智能体的第 3 级如何转交到主会�
     childDecisions.push(await post(childRead, result('每次读到的都是同一份内容'), accept));
   }
   check('子智能体第 3 次拿到第 1 级提醒', childDecisions[2].content?.length, 2);
+  check('第 1 级不带交接模板', childDecisions[2].content[1].text.includes(HANDOFF_TEMPLATE), false);
+  check('第 1 级不带用户通知', childDecisions[2].additionalContexts, undefined);
   check('子智能体自家触发的第 3 级不追加给它', childDecisions[3].content, undefined);
 
   await pre(mainWrite, accept);
@@ -311,6 +316,7 @@ console.log('\n--- 管线集成：子智能体的第 3 级如何转交到主会�
   check('转交文案是第 2 级且写明子智能体 id', line[1], `[drift-guard 第2级] 子智能体 sub-42 可能在打转：${signalText({ signal: 's1', count: 4, tool: 'read' })}`);
   check('转交文案用第 2 级建议', line[2], `建议：${LEVEL_ADVICE[2]}`);
   check('转交文案里没有"开新会话"', line.join('\n').includes('开新会话'), false);
+  check('转交的第 2 级文案不带用户通知', mainDecision.additionalContexts, undefined);
   check('主会话的写入结果原文保留', mainDecision.content[0].text, '写入完成');
 }
 
@@ -603,17 +609,44 @@ console.log('\n--- R 的再提醒门槛：固定倍增 1 → 2 → 4 → 8… --
   check('冷却走完后这条上限提醒补上', chooseReminder(entry, [hit], BASE)?.level, 3);
 }
 
+{
+  // todo 快照从 trackCall 一路传到 R；没有新快照时沿用该会话上一次的计数。
+  const state = freshState();
+  const entry = createSessionSignals();
+  entry.signals.calls = 39; // 下一次 trackCall 会 +1 到 40，好对齐 N 的手算值
+  state.bySession.set(rootSession, entry);
+  const settings = { ...BASE, cooldownCalls: 99 };
+  const call = (todo, index) => trackCall(state, {
+    session: rootSession,
+    isMain: true,
+    tool: 'write',
+    args: { file_path: `todo-wire-${index}.py` },
+    result: ok(`w${index}`),
+    cwd: SANDBOX,
+    todo,
+  }, settings);
+  call({ completed: 4, pending: 2, inProgress: 1 }, 1);
+  check('trackCall 把 todo 交给 R', [state.ratio.N, state.ratio.nSource], [30, 'todo']);
+  call(undefined, 2);
+  check('没有新快照时沿用上一次 todo', state.ratio.nSource, 'todo');
+  check('沿用快照时 N 按新的 calls 重算', state.ratio.N, 30.75);
+}
+
 console.log('\n--- /drift 报告里的 R 构成 ---');
 {
   const book = { capAlerted: true, rTier: 3 }; // 已跨过 1、2、4 → 下次门槛 8
   const ratio = handoffRatio({ tokens: 200000, calls: 40, deltas: { s2: 0 }, checkedSteps: 2, uncheckedSteps: 6 });
   const lines = ratioReport(ratio, book);
   check('第一行给出 R 与是否到线', lines[0], '交接收益比 R ≈ 7.53（R ≥ 1，已到交接条件）');
-  check('第二行给出 C 的来源与基线', lines[1], '  上下文 C ≈ 200000 token（来自 tokenMeter）／基线 C₀ = 20000');
+  check('第二行给出 C 的来源与基线', lines[1], '  上下文 C = 200000 token（tokenMeter 原始值）／基线 C₀ = 20000');
   check('第三行给出 N 与它的来源', lines[2], '  剩余工作量 N = 120（按 PLAN.md 未打勾项数外推）');
   check('第四行给出 D 与各分量', lines[3], '  偏离强度 D = 1.00（S2 Δ=0 × 1.00）');
   check('第五行给出参数与硬上限状态', lines[4], '  参数 r = 0.02、L = 5、H = 60000；硬上限 600000 token（未触达）');
   check('第六行给出再提醒门槛', lines[5], '  再提醒门槛：硬上限已单独提醒过；下次要 R ≥ 8（固定倍增门槛：1 → 2 → 4 → 8…）');
+  const todoRatio = handoffRatio({ tokens: 200000, calls: 40, deltas: {}, todo: { completed: 4, pending: 2, inProgress: 1 } });
+  check('N 行写 todo 来源与计数', ratioReport(todoRatio, null)[2], '  剩余工作量 N = 30（按 todo_write 清单外推：completed 4、in_progress 1、pending 2）');
+  const lowRatio = handoffRatio({ tokens: 200000, calls: 40, deltas: {}, todo: { completed: 1, pending: 2, inProgress: 1 } });
+  check('todo 完成不足 2 条时 N 行说明原因', ratioReport(lowRatio, null)[2], '  剩余工作量 N = 20（todo 完成条目不足 2 条，取默认值）');
   check('估算的 C 会写明估算依据', ratioReport(handoffRatio({ calls: 40, deltas: {} }))[1].includes('按 40 次调用 × 1500 估算'), true);
   check('没有数据时说明原因', ratioReport(null)[0], '交接收益比 R：本会话还没有工具调用，暂无数据。');
   check('参数非法时写明原因', ratioReport({ invalid: true, reason: '参数 r 不是有限数（NaN）' })[0], '交接收益比 R：参数非法（参数 r 不是有限数（NaN）），R 的判定按"不触发"处理。');
@@ -628,6 +661,243 @@ console.log('\n--- /drift 报告里的 R 构成 ---');
   check('报告里原来的部分还在', [text.includes('已批准清单'), text.includes('暂无提醒。')], [true, true]);
   const empty = formatDriftReport(freshState());
   check('没有额度数据时报告不崩、只说明暂无数据', empty.includes('交接收益比 R：本会话还没有工具调用，暂无数据。'), true);
+}
+
+{
+  // 管线级持久化：一次工具调用后写状态文件；同 id 的新会话对象能读回。
+  const home = path.join(SANDBOX, 'persist-pipeline');
+  fs.mkdirSync(home, { recursive: true });
+  const session = { id: 'persist-pipeline', header: { id: 'persist-pipeline', cwd: home } };
+  const listeners = {};
+  const ctx = {
+    listeners,
+    effect(generator) { for (const registered of generator()) void registered; },
+    on(name, handler) { listeners[name] = handler; return () => {}; },
+    commands: { register: () => () => {} },
+  };
+  apply(ctx, { cooldownCalls: 99 });
+  const accept = async () => ({ kind: 'accept' });
+  const exec = { name: 'write', arguments: { file_path: path.join(home, 'x.txt') }, agent: { id: 'a', session } };
+  await listeners['tools/pre-execute'](exec, accept);
+  await listeners['tools/post-execute'](exec, { isError: false, content: [{ type: 'text', text: 'ok' }] }, accept);
+  const file = path.join(home, '.drift', 'state', 'persist-pipeline.json');
+  check('post-execute 后写出状态文件', fs.existsSync(file), true);
+  const raw = JSON.parse(fs.readFileSync(file, 'utf8'));
+  check('状态文件里的 calls = 1', raw.calls, 1);
+  const againSession = { id: 'persist-pipeline', header: { id: 'persist-pipeline', cwd: home } };
+  const againState = stateOf(againSession, home);
+  check('同 id 的新会话恢复 calls', againState.bySession.get(againSession)?.signals.calls, 1);
+}
+
+{
+  // 第 3 级交接模板：同一会话只发一次；第 1/2 级不带（第 1 级的断言在子智能体场景里）。
+  const home = path.join(SANDBOX, 'template-pipeline');
+  fs.mkdirSync(home, { recursive: true });
+  const session = { id: 'template-pipeline', header: { id: 'template-pipeline', cwd: home } };
+  let tokens = 200000;
+  const listeners = {};
+  const ctx = {
+    listeners,
+    effect(generator) { for (const registered of generator()) void registered; },
+    on(name, handler) { listeners[name] = handler; return () => {}; },
+    commands: { register: () => () => {} },
+    tokenMeter: { measure: async () => ({ totalTokens: tokens }) },
+  };
+  apply(ctx, { cooldownCalls: 1, handoffRatio: { capTokens: 100000000 } });
+  const accept = async () => ({ kind: 'accept' });
+  const result = (text) => ({ isError: false, content: [{ type: 'text', text }] });
+  const exec = (index) => ({
+    name: 'write',
+    arguments: { file_path: path.join(home, `t${index}.txt`) },
+    agent: { id: 'a', session },
+  });
+  await listeners['tools/pre-execute'](exec(1), accept);
+  const first = await listeners['tools/post-execute'](exec(1), result('ok'), accept);
+  // 模板挂在那条合成消息上，不再塞进工具结果（贴着文件内容会被当成提示注入）。
+  check('第 3 级带交接模板（在通知里）', first.additionalContexts?.[0]?.content?.[0]?.text.includes(HANDOFF_TEMPLATE), true);
+  check('模板里有最新交接标记', first.additionalContexts?.[0]?.content?.[0]?.text.includes('drift-guard handoff:start'), true);
+  check('工具结果里不再夹带模板', first.content?.[1]?.text.includes('drift-guard handoff:start'), false);
+  check('第 3 级提醒自报来源', first.content?.[1]?.text.includes('不是工具输出，也不是文件内容'), true);
+  check('第 3 级要求先告诉用户再动手', first.additionalContexts?.[0]?.content?.[0]?.text.includes('请在本轮回复里明确告诉用户'), true);
+  check('第 3 级带用户可见通知', first.additionalContexts?.length, 1);
+  check('通知是 drift-guard 的合成 user 消息', [
+    first.additionalContexts?.[0]?.role,
+    first.additionalContexts?.[0]?.source?.kind,
+    first.additionalContexts?.[0]?.source?.form,
+    first.additionalContexts?.[0]?.source?.summary,
+  ], ['user', 'drift-guard', 'notice', '交接提醒']);
+  // v4 原生准入明确拒绝 kind === 'plugin'（退休语法）；实测 kind:'user' 也不渲染气泡，
+  // 所以用自报 kind，至少归属诚实。
+  check('通知不用已退休的 plugin kind', first.additionalContexts?.[0]?.source?.kind === 'plugin', false);
+  check('通知不伪装成用户自己发的消息', first.additionalContexts?.[0]?.source?.kind === 'user', false);
+  check('通知正文写明建议交接', first.additionalContexts?.[0]?.content?.[0]?.text.includes('建议交接'), true);
+
+  tokens = 320000;
+  await listeners['tools/pre-execute'](exec(2), accept);
+  const second = await listeners['tools/post-execute'](exec(2), result('ok'), accept);
+  check('第二次第 3 级仍投递提醒', second.content?.length, 2);
+  check('第二次第 3 级不重复模板', second.content?.[1]?.text.includes(HANDOFF_TEMPLATE), false);
+  check('第二次第 3 级仍发用户通知', second.additionalContexts?.length, 1);
+}
+
+console.log('\n--- 阶段 5：交接完成判定 + rTier ---');
+{
+  // 主判据：成功写入 <工作区>/PROGRESS.md。
+  const home = path.join(SANDBOX, 'handoff-write');
+  fs.mkdirSync(home, { recursive: true });
+  const session = { id: 'handoff-write', header: { id: 'handoff-write', cwd: home } };
+  const listeners = {};
+  const ctx = {
+    listeners,
+    effect(generator) { for (const registered of generator()) void registered; },
+    on(name, handler) { listeners[name] = handler; return () => {}; },
+    commands: { register: () => () => {} },
+    tokenMeter: { measure: async () => ({ totalTokens: 200000 }) },
+  };
+  apply(ctx, { cooldownCalls: 1, handoffRatio: { capTokens: 100000000 } });
+  const accept = async () => ({ kind: 'accept' });
+  const result = (text) => ({ isError: false, content: [{ type: 'text', text }] });
+  const call = (name, file) => ({ name, arguments: { file_path: path.join(home, file) }, agent: { id: 'a', session } });
+  const state = stateOf(session, home);
+
+  await listeners['tools/pre-execute'](call('write', 'a.txt'), accept);
+  await listeners['tools/post-execute'](call('write', 'a.txt'), result('ok'), accept);
+  check('第 3 级后记下交接起点', typeof state.handoff?.at, 'number');
+  check('开始时未完成', state.handoff.completed, undefined);
+  const book = state.bySession.get(session).reminders.r;
+  const tierBefore = book.rTier;
+
+  await listeners['tools/pre-execute'](call('write', 'other.txt'), accept);
+  await listeners['tools/post-execute'](call('write', 'other.txt'), result('ok'), accept);
+  check('写别的文件不算交接完成', state.handoff.completed, undefined);
+
+  await listeners['tools/pre-execute'](call('edit', 'PROGRESS.md'), accept);
+  await listeners['tools/post-execute'](call('edit', 'PROGRESS.md'), result('ok'), accept);
+  check('写 PROGRESS.md 判为交接完成', state.handoff.completed, true);
+  check('判定依据是写入', state.handoff.via, 'write');
+  check('完成后 rTier 至少 2', book.rTier >= 2, true);
+  check('完成后 rTier 不回退', book.rTier >= tierBefore, true);
+  check('完成后 R 不会立刻再提醒（门槛已推高）', (await (async () => {
+    await listeners['tools/pre-execute'](call('read', 'a.txt'), accept);
+    const decision = await listeners['tools/post-execute'](call('read', 'a.txt'), result('ok'), accept);
+    return decision.content?.some((block) => String(block.text).includes('第3级')) === true;
+  })()), false);
+}
+{
+  // 补充判据：PROGRESS.md 的 mtime+size 变化（覆盖 ops_bash/pwsh 与手改）。
+  const home = path.join(SANDBOX, 'handoff-stamp');
+  fs.mkdirSync(home, { recursive: true });
+  const session = { id: 'handoff-stamp', header: { id: 'handoff-stamp', cwd: home } };
+  const listeners = {};
+  const ctx = {
+    listeners,
+    effect(generator) { for (const registered of generator()) void registered; },
+    on(name, handler) { listeners[name] = handler; return () => {}; },
+    commands: { register: () => () => {} },
+    tokenMeter: { measure: async () => ({ totalTokens: 200000 }) },
+  };
+  apply(ctx, { cooldownCalls: 1, handoffRatio: { capTokens: 100000000 } });
+  const accept = async () => ({ kind: 'accept' });
+  const result = (text) => ({ isError: false, content: [{ type: 'text', text }] });
+  const read = (index) => ({ name: 'read', arguments: { file_path: path.join(home, `r${index}.txt`) }, agent: { id: 'a', session } });
+  const state = stateOf(session, home);
+
+  await listeners['tools/pre-execute'](read(1), accept);
+  await listeners['tools/post-execute'](read(1), result('ok'), accept);
+  check('文件不存在时指纹为空', state.handoff.progressStamp, undefined);
+  await listeners['tools/pre-execute'](read(2), accept);
+  await listeners['tools/post-execute'](read(2), result('ok'), accept);
+  check('文件一直不存在就不算完成', state.handoff.completed, undefined);
+
+  fs.writeFileSync(path.join(home, 'PROGRESS.md'), '手写或脚本写的进度\n');
+  await listeners['tools/pre-execute'](read(3), accept);
+  await listeners['tools/post-execute'](read(3), result('ok'), accept);
+  check('PROGRESS.md 出现后判为交接完成', state.handoff.completed, true);
+  check('判定依据是指纹', state.handoff.via, 'fingerprint');
+}
+{
+  // /drift 把交接状态说清楚。
+  const state = {
+    handoff: { at: Date.now() - 60000, progressStamp: '1:2', completed: true, completedAt: Date.now(), via: 'write' },
+    ratio: { R: 1.2, calls: 40, nSource: 'plan', N: 5, D: 0, C0: 20000, C: 200000, r: 0.02, L: 5, H: 60000, capTokens: 600000, capped: false, estimated: false, deltas: {} },
+    plan: null,
+    alerts: [],
+    seen: new Set(),
+    lastSeen: 0,
+  };
+  const lines = handoffReport(state, { alerts: 1, lastCall: 35, rTier: 2 }, { cooldownCalls: 10 });
+  check('报告写明上次第 3 级时间', lines.some((line) => line.includes('上次第 3 级提醒：')), true);
+  check('报告写明已完成与依据', lines.some((line) => line.includes('交接完成：是') && line.includes('成功写入 PROGRESS.md')), true);
+  check('报告写明 R 冷却剩余', lines.some((line) => line.includes('还要 5 次工具调用')), true);
+  const notYet = handoffReport({ handoff: null, ratio: null }, undefined, undefined);
+  check('没发过第 3 级时如实说', notYet.join('\n').includes('还没发过第 3 级提醒'), true);
+  const done = formatDriftReport(state, { alerts: 1, lastCall: 35, rTier: 2 }, { cooldownCalls: 10 });
+  check('/drift 里带交接状态段', done.includes('交接状态：'), true);
+  check('/drift 里带 tokenMeter 原始值', done.includes('tokenMeter 原始值'), true);
+}
+
+console.log('\n--- S6：不进 ≥2 计数、压住 S4、真实用户消息清零 ---');
+{
+  // 两个真信号同时成立才是第 3 级；把其中一个换成 S6 仍应是第 2 级。
+  const settings = { ...BASE, s1Repeats: 4, s2Alternations: 2, s4IdleCalls: 20, s6RoamCalls: 12, cooldownCalls: 10 };
+  const two = createSessionSignals();
+  two.signals.calls = 30;
+  two.signals.s1.count = 4;
+  two.signals.s2.count = 2;
+  two.reminders.s1.alerts = 1;
+  check('两个真信号同时成立 → 第 3 级', chooseReminder(two, [{ signal: 's1', count: 4 }], settings).level, 3);
+  const withS6 = createSessionSignals();
+  withS6.signals.calls = 30;
+  withS6.signals.s1.count = 4;
+  withS6.signals.s6.count = 12;
+  withS6.reminders.s1.alerts = 1;
+  check('S1 + S6 只算一个真信号 → 第 2 级', chooseReminder(withS6, [{ signal: 's1', count: 4 }], settings).level, 2);
+}
+{
+  // S6 触发期间 S4 的提醒被压住（两条判据嵌套，只说一次）。
+  const settings = { ...BASE, s4IdleCalls: 20, s6RoamCalls: 12, cooldownCalls: 0 };
+  const roaming = createSessionSignals();
+  roaming.signals.calls = 40;
+  roaming.signals.s4.count = 20;
+  roaming.signals.s6.count = 12;
+  const chosen = chooseReminder(roaming, [
+    { signal: 's4', count: 20, source: 'plan', progress: 5 },
+    { signal: 's6', count: 12, tool: 'read' },
+  ], settings);
+  check('S6 触发时 S4 被压住，只提醒 S6', chosen.hit.signal, 's6');
+  const idleOnly = createSessionSignals();
+  idleOnly.signals.calls = 40;
+  idleOnly.signals.s4.count = 20;
+  idleOnly.signals.s6.count = 11;
+  check('S6 未触发时 S4 照常提醒', chooseReminder(idleOnly, [
+    { signal: 's4', count: 20, source: 'plan', progress: 5 },
+  ], settings).hit.signal, 's4');
+}
+{
+  // 真实用户消息（无 form）清零；插件自己的通知（form:'notice'）不清零。
+  const listeners = {};
+  const ctx = {
+    listeners,
+    effect(generator) { for (const registered of generator()) void registered; },
+    on(name, handler) { listeners[name] = handler; return () => {}; },
+    commands: { register: () => () => {} },
+  };
+  apply(ctx, { ...BASE, s6RoamCalls: 3, cooldownCalls: 1 });
+  const session = { id: 'roam-reset', header: { cwd: SANDBOX } };
+  const exec = (i) => ({ name: 'read', arguments: { file_path: path.join(SANDBOX, `roam-${i}.txt`) }, agent: { id: 'a', session } });
+  const accept = async () => ({ kind: 'accept' });
+  for (let i = 1; i <= 2; i += 1) {
+    await listeners['tools/pre-execute'](exec(i), accept);
+    await listeners['tools/post-execute'](exec(i), ok(`r${i}`), accept);
+  }
+  const state = stateOf(session, SANDBOX);
+  check('两次漫游后计数为 2', state.bySession.get(session).signals.s6.count, 2);
+  listeners['session/event'](session, { type: 'user/message', data: { source: { kind: 'user', form: 'notice', summary: '交接提醒' } } });
+  check('插件自己的通知不清零 S6', state.bySession.get(session).signals.s6.count, 2);
+  listeners['session/event'](session, { type: 'user/message', data: { source: { kind: 'user', rpcId: 'rpc-1' } } });
+  check('真实用户消息清零 S6', state.bySession.get(session).signals.s6.count, 0);
+  listeners['session/event'](session, { type: 'assistant/message', data: {} });
+  check('其他会话事件不动 S6', state.bySession.get(session).signals.s6.count, 0);
 }
 
 fs.rmSync(SANDBOX, { recursive: true, force: true });

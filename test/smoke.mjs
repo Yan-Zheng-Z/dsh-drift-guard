@@ -15,8 +15,13 @@ import {
   isOutsideWorkspace,
   resolvePath,
   relativePath,
+  createSessionSignals,
+  stateOf,
+  handoffRatio,
+  deviationDeltas,
   REPEAT_THRESHOLD,
 } from '../lib/index.js';
+import { applyEntry, loadState, saveState, stateFile } from '../lib/persist.js';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -268,6 +273,59 @@ check('文案里的规则范围包含规则 4/5', reportFor({ status: 'absent' }
 check('没有 PLAN.md 时明确说明', reportFor({ status: 'absent', approved: null }).includes('没有 PLAN.md'), true);
 check('无提醒时显示"暂无提醒"', reportFor({ status: 'absent', approved: null }).includes('暂无提醒'), true);
 check('没有会话工作区时不静默', reportFor({ status: 'no-cwd', approved: null }).includes('没有记录工作目录'), true);
+
+console.log('\n--- 跨重启状态持久化 ---');
+{
+  const session = { header: { id: 'session-persist-test' } };
+  const cwd = path.join(SANDBOX, 'persist-ws');
+  fs.mkdirSync(cwd, { recursive: true });
+  const state = {
+    cwd,
+    handoff: { at: 123, progressStamp: '1:2', completed: false },
+    handoffTemplateSent: true,
+  };
+  const entry = createSessionSignals();
+  entry.signals.calls = 40;
+  entry.signals.active = { s2: 30, s4: 36 };
+  entry.signals.s4 = { source: 'todo', baseline: 5, count: 3, alerted: 0 };
+  entry.todo = { completed: 4, pending: 2, inProgress: 1 };
+  entry.reminders.r = { alerts: 2, lastCall: 35, capAlerted: true, rTier: 2 };
+
+  check('保存状态成功', saveState(state, session, entry), true);
+  const file = stateFile(cwd, session);
+  check('状态文件在 .drift/state 下', file !== undefined && file.endsWith(path.join('.drift', 'state', 'session-persist-test.json')), true);
+  check('状态文件确实存在', file !== undefined && fs.existsSync(file), true);
+
+  const restored = loadState(cwd, session);
+  check('读回 calls', restored?.calls, 40);
+  check('读回 active', restored?.active, { s2: 30, s4: 36 });
+  check('读回 S4 源与基线', [restored?.s4.source, restored?.s4.baseline, restored?.s4.count], ['todo', 5, 3]);
+  check('读回 todo 计数', restored?.todo, { completed: 4, pending: 2, inProgress: 1 });
+  check('读回提醒簿记', [restored?.reminders.r.alerts, restored?.reminders.r.lastCall, restored?.reminders.r.rTier, restored?.reminders.r.capAlerted], [2, 35, 2, true]);
+  check('读回交接状态', restored?.handoff, { at: 123, progressStamp: '1:2' });
+  check('读回模板标记', restored?.handoffTemplateSent, true);
+
+  const fresh = createSessionSignals();
+  check('applyEntry 合并成功', applyEntry(fresh, restored), true);
+  check('恢复后的 calls/active 一致', [fresh.signals.calls, fresh.signals.active.s2, fresh.signals.active.s4], [40, 30, 36]);
+  check('恢复后的 todo 参与 N', handoffRatio({ calls: fresh.signals.calls, deltas: {}, todo: fresh.todo, checkedSteps: 1, uncheckedSteps: 99 }).N, 30);
+  const dBefore = handoffRatio({ calls: 40, deltas: deviationDeltas({ calls: 40, active: { s2: 30, s4: 36 } }) }).D;
+  const dAfter = handoffRatio({ calls: fresh.signals.calls, deltas: deviationDeltas(fresh.signals) }).D;
+  check('D 在重启前后一致', Math.abs(dBefore - dAfter) < 1e-12, true);
+
+  const live = { header: { id: 'session-persist-test', cwd } };
+  const liveState = stateOf(live, cwd);
+  const liveEntry = liveState.bySession.get(live);
+  check('stateOf 首次创建时恢复 calls', liveEntry?.signals.calls, 40);
+  check('stateOf 恢复 handoff 与模板标记', [liveState.handoff?.at, liveState.handoffTemplateSent, liveState.restoredAt > 0], [123, true, true]);
+
+  fs.writeFileSync(file, '{not json', 'utf8');
+  check('损坏文件不恢复', loadState(cwd, session), undefined);
+  fs.writeFileSync(file, JSON.stringify({ version: 999, sessionId: 'session-persist-test' }), 'utf8');
+  check('版本不符不恢复', loadState(cwd, session), undefined);
+  check('没有 session id 时不写', saveState(state, { header: {} }, entry), false);
+  check('没有 session id 时不读', loadState(cwd, { header: {} }), undefined);
+}
 
 fs.rmSync(SANDBOX, { recursive: true, force: true });
 
