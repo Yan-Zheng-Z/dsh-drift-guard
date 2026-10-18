@@ -200,14 +200,14 @@ console.log('\n--- 端到端：真实命中 → 选级 → 拼出追加块 ---')
   const file = path.join(SANDBOX, 'repeat.txt');
   fs.writeFileSync(file, 'x\n');
   let picked = null;
-  for (let i = 0; i < 3; i += 1) {
-    const hits = observeCall(entry.signals, { tool: 'read', args: { file_path: file }, result: ok(`第 ${i} 次`), cwd: SANDBOX }, BASE);
+  for (let i = 0; i < 13; i += 1) {
+    const hits = observeCall(entry.signals, { tool: 'read', args: { file_path: file }, result: ok('同一份内容'), cwd: SANDBOX }, BASE);
     picked = chooseReminder(entry, hits, BASE) ?? picked;
   }
-  check('真实的 S3 命中被选成第 1 级', [picked?.hit.signal, picked?.level], ['s3', 1]);
+  check('真实的 M1 饱和命中被选成第 1 级', [picked?.hit.signal, picked?.level], ['s6', 1]);
   const block = reminderText(picked.level, SIGNAL_NAME[picked.hit.signal], signalText(picked.hit));
   const appended = appendTarget({ kind: 'accept' }, [{ type: 'text', text: '原文' }], block);
-  check('追加块里带 S3 的名字与事实', [appended[0].text, appended[1].text.includes('S3 重复读取'), appended[1].text.includes('repeat.txt')], ['原文', true, true]);
+  check('追加块里带 S6 的名字与事实', [appended[0].text, appended[1].text.includes('S6 漫游调用'), appended[1].text.includes('read')], ['原文', true, true]);
 }
 
 console.log('\n--- 会话归属与投递（要求 1、2）---');
@@ -223,15 +223,17 @@ const fakeSession = (id) => ({ id, header: { cwd: SANDBOX } });
 const rootSession = fakeSession('root');
 const childSession = fakeSession('child');
 {
-  // S1–S4 按会话分开计数：主会话读 2 次 + 子智能体读 1 次，谁都不该凑够自己的 3 次
+  // 检测按会话分开计数：主会话读 12 次、子智能体读 1 次，谁都没凑够自己的饱和窗口
   const state = freshState();
   const file = path.join(SANDBOX, 'shared.txt');
   fs.writeFileSync(file, 's\n');
-  const mainCall = (i) => trackCall(state, { session: rootSession, isMain: true, tool: 'read', args: { file_path: file }, result: ok(`主 ${i}`), cwd: SANDBOX }, BASE);
-  const childCall = (i) => trackCall(state, { session: childSession, isMain: false, tool: 'read', args: { file_path: file }, result: ok(`子 ${i}`), cwd: SANDBOX }, BASE);
-  check('主会话读 2 次不触发', [mainCall(1), mainCall(2)], [null, null]);
-  check('子智能体读 1 次也不触发（计数按会话分开）', childCall(1), null);
-  check('主会话再读 1 次才凑够自己的第 3 次', mainCall(3)?.level, 1);
+  const mainCall = (i) => trackCall(state, { session: rootSession, isMain: true, tool: 'read', args: { file_path: file }, result: ok('同一份内容'), cwd: SANDBOX }, BASE);
+  const childCall = () => trackCall(state, { session: childSession, isMain: false, tool: 'read', args: { file_path: file }, result: ok('子'), cwd: SANDBOX }, BASE);
+  const early = [];
+  for (let i = 1; i <= 12; i += 1) early.push(mainCall(i));
+  check('主会话读 12 次不触发', early, Array(12).fill(null));
+  check('子智能体读 1 次也不触发（计数按会话分开）', childCall(), null);
+  check('主会话再读 1 次才凑够自己的饱和窗口', mainCall(13)?.level, 1);
 }
 {
   // R 只统计主会话自己的调用：子智能体的上下文规模不进主会话的账
@@ -253,17 +255,25 @@ const childSession = fakeSession('child');
   check('子智能体那 3 次的上下文没有混进主会话的账', state.bySession.get(rootSession).signals.calls, 1);
 }
 {
-  // 第 3 级只追加到主会话：子智能体自己读 4 次同一文件，第 4 次 S1+S3 同时成立 -> 第 3 级
+  // 第 3 级只追加到主会话：子智能体交替 + todo 停滞同时成立（两个机理）→ 第 3 级
   const state = freshState();
-  const file = path.join(SANDBOX, 'repeat2.txt');
-  fs.writeFileSync(file, 'r\n');
-  const childCall = () => trackCall(state, { session: childSession, isMain: false, tool: 'read', args: { file_path: file }, result: ok('同一份内容'), cwd: SANDBOX }, BASE);
-  const childSeq = [childCall(), childCall(), childCall(), childCall()];
-  check('子智能体第 3 次拿到第 1 级', childSeq[2]?.level, 1);
-  check('子智能体第 4 次的第 3 级不追加给它', childSeq[3], null);
+  const todo = { completed: 0, pending: 2, inProgress: 0 };
+  const childCall = (i) => trackCall(state, {
+    session: childSession,
+    isMain: false,
+    tool: 'read',
+    args: { file_path: i % 2 === 0 ? 'a.txt' : 'b.txt' },
+    result: ok(`内容 ${i}`),
+    todo,
+    cwd: SANDBOX,
+  }, BASE);
+  const childSeq = [];
+  for (let i = 1; i <= 21; i += 1) childSeq.push(childCall(i));
+  check('子智能体第 12 次拿到第 1 级', childSeq[11]?.level, 1);
+  check('子智能体第 21 次的第 3 级不追加给它', childSeq[20], null);
   check('第 3 级挂到主会话待投递', state.pendingMain?.level, 3);
   const mainCall = trackCall(state, { session: rootSession, isMain: true, tool: 'write', args: { file_path: 'x.py' }, result: ok('x'), cwd: SANDBOX }, BASE);
-  check('主会话的下一次工具结果拿到挂起的第 3 级', [mainCall?.alert.type, mainCall?.level], ['s1', 3]);
+  check('主会话的下一次工具结果拿到挂起的第 3 级', [mainCall?.alert.type, mainCall?.level], ['s4', 3]);
   check('挂起被消费掉', state.pendingMain, null);
 }
 
@@ -300,22 +310,32 @@ console.log('\n--- 管线集成：子智能体的第 3 级如何转交到主会�
   const childRead = { name: 'read', arguments: { file_path: childFile }, agent: { id: 'sub-42', session: childSession } };
   const mainWrite = { name: 'write', arguments: { file_path: path.join(home, 'main.py') }, agent: { id: 'main-agent', session: mainSession } };
 
+  // 子智能体：先写一次 todo（制造"有剩余项"的进度源），再交替读两个文件 21 次。
+  const childTodo = { name: 'todo_write', arguments: { todos: [{ status: 'pending' }, { status: 'pending' }] }, agent: { id: 'sub-42', session: childSession } };
+  await pre(childTodo, accept);
+  await post(childTodo, result('已更新'), accept);
+  fs.writeFileSync(path.join(home, 'a.txt'), 'a\n');
+  fs.writeFileSync(path.join(home, 'b.txt'), 'b\n');
   const childDecisions = [];
-  for (let i = 1; i <= 4; i += 1) {
+  for (let i = 1; i <= 21; i += 1) {
+    const childRead = {
+      name: 'read',
+      arguments: { file_path: path.join(home, i % 2 === 0 ? 'a.txt' : 'b.txt') },
+      agent: { id: 'sub-42', session: childSession },
+    };
     await pre(childRead, accept);
-    // 结果内容必须完全相同，才轮到 S1（同参同结果）而不是每轮都算“新结果”
-    childDecisions.push(await post(childRead, result('每次读到的都是同一份内容'), accept));
+    childDecisions.push(await post(childRead, result(`内容 ${i}`), accept));
   }
-  check('子智能体第 3 次拿到第 1 级提醒', childDecisions[2].content?.length, 2);
-  check('第 1 级不带交接模板', childDecisions[2].content[1].text.includes(HANDOFF_TEMPLATE), false);
-  check('第 1 级不带用户通知', childDecisions[2].additionalContexts, undefined);
-  check('子智能体自家触发的第 3 级不追加给它', childDecisions[3].content, undefined);
+  check('子智能体第 12 次拿到第 1 级提醒', childDecisions[11].content?.length, 2);
+  check('第 1 级不带交接模板', childDecisions[11].content[1].text.includes(HANDOFF_TEMPLATE), false);
+  check('第 1 级不带用户通知', childDecisions[11].additionalContexts, undefined);
+  check('子智能体自家触发的第 3 级不追加给它', childDecisions[20].content, undefined);
 
   await pre(mainWrite, accept);
   const mainDecision = await post(mainWrite, result('写入完成'), accept);
   check('主会话的下一次工具结果收到转交提醒', mainDecision.content?.length, 2);
   const line = mainDecision.content[1].text.split('\n');
-  check('转交文案是第 2 级且写明子智能体 id', line[1], `[drift-guard 第2级] 子智能体 sub-42 可能在打转：${signalText({ signal: 's1', count: 4, tool: 'read' })}`);
+  check('转交文案是第 2 级且写明子智能体 id', line[1], `[drift-guard 第2级] 子智能体 sub-42 可能在打转：${signalText({ signal: 's4', count: 20, source: 'todo', progress: 0 })}`);
   check('转交文案用第 2 级建议', line[2], `建议：${LEVEL_ADVICE[2]}`);
   check('转交文案里没有"开新会话"', line.join('\n').includes('开新会话'), false);
   check('转交的第 2 级文案不带用户通知', mainDecision.additionalContexts, undefined);
@@ -351,22 +371,22 @@ console.log('\n--- 管线集成：注册真实监听器后，提醒如何落到�
   const post = ctx.listeners['tools/post-execute'];
   const exec = () => ({ name: 'read', arguments: { file_path: file }, agent: { session } });
   const results = [];
-  for (let i = 1; i <= 9; i += 1) results.push({ isError: false, content: [{ type: 'text', text: `第 ${i} 次读到的内容` }] });
+  for (let i = 1; i <= 15; i += 1) results.push({ isError: false, content: [{ type: 'text', text: '同一份内容' }] });
   const accept = async () => ({ kind: 'accept' });
 
   const decisions = [];
-  for (let i = 0; i < 5; i += 1) {
+  for (let i = 0; i < 15; i += 1) {
     await pre(exec(), accept);
     decisions.push(await post(exec(), results[i], accept));
   }
-  check('前 2 次读取的结果原样返回', [decisions[0].content, decisions[1].content], [undefined, undefined]);
-  check('第 3 次读取在末尾追加一条提醒', decisions[2].content?.length, 2);
-  check('原文按同一引用保留', decisions[2].content[0] === results[2].content[0], true);
-  check('追加块的格式与级别', decisions[2].content[1].text.split('\n').slice(0, 2), [
+  check('前 12 次读取的结果原样返回', [decisions[0].content, decisions[11].content], [undefined, undefined]);
+  check('第 13 次读取在末尾追加一条提醒', decisions[12].content?.length, 2);
+  check('原文按同一引用保留', decisions[12].content[0] === results[12].content[0], true);
+  check('追加块的格式与级别', decisions[12].content[1].text.split('\n').slice(0, 2), [
     '---',
-    '[drift-guard 第1级] S3 重复读取：read 已连续 3 次读取未修改的 repeat.txt',
+    '[drift-guard 第1级] S6 漫游调用：连续 12 次工具调用既没有带来新结果、也没有推进产物（最后一次 tool=read）',
   ]);
-  check('第 4、5 次不再追加', [decisions[3].content, decisions[4].content], [undefined, undefined]);
+  check('第 14、15 次不再追加', [decisions[13].content, decisions[14].content], [undefined, undefined]);
 
   await pre(exec(), accept);
   const blocked = await post(exec(), results[5], async () => ({ kind: 'block', feedback: [{ type: 'text', text: '被下游拦下' }] }));
@@ -377,10 +397,7 @@ console.log('\n--- 管线集成：注册真实监听器后，提醒如何落到�
   check('content 不是数组时不追加', [odd.kind, odd.content], ['accept', undefined]);
 
   const log = fs.readFileSync(path.join(home, '.drift', 'alerts.log'), 'utf8');
-  check('日志里记下了这两次提醒（带级别）', [
-    log.includes('第1级 S3 重复读取'),
-    log.includes('第2级 S3 重复读取'),
-  ], [true, true]);
+  check('日志里记下了这次提醒（带级别）', log.includes('第1级 S6 漫游调用'), true);
 }
 
 console.log('\n--- 管线集成：R 用主会话的 tokenMeter，拿不到时按调用次数估算 ---');
@@ -944,14 +961,14 @@ console.log('\n--- S6：不进 ≥2 计数、压住 S4、真实用户消息清�
   };
   apply(ctx, { ...BASE, s6RoamCalls: 3, cooldownCalls: 1 });
   const session = { id: 'roam-reset', header: { cwd: SANDBOX } };
-  const exec = (i) => ({ name: 'read', arguments: { file_path: path.join(SANDBOX, `roam-${i}.txt`) }, agent: { id: 'a', session } });
+  const exec = () => ({ name: 'read', arguments: { file_path: path.join(SANDBOX, 'roam.txt') }, agent: { id: 'a', session } });
   const accept = async () => ({ kind: 'accept' });
-  for (let i = 1; i <= 2; i += 1) {
-    await listeners['tools/pre-execute'](exec(i), accept);
-    await listeners['tools/post-execute'](exec(i), ok(`r${i}`), accept);
+  for (let i = 1; i <= 3; i += 1) {
+    await listeners['tools/pre-execute'](exec(), accept);
+    await listeners['tools/post-execute'](exec(), ok('r'), accept);
   }
   const state = stateOf(session, SANDBOX);
-  check('两次漫游后计数为 2', state.bySession.get(session).signals.s6.count, 2);
+  check('三次重复读取后计数为 2', state.bySession.get(session).signals.s6.count, 2);
   listeners['session/event'](session, { type: 'user/message', data: { source: { kind: 'user', form: 'notice', summary: '交接提醒' } } });
   check('插件自己的通知不清零 S6', state.bySession.get(session).signals.s6.count, 2);
   listeners['session/event'](session, { type: 'user/message', data: { source: { kind: 'user', rpcId: 'rpc-1' } } });

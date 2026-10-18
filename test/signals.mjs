@@ -60,393 +60,145 @@ const withWork = (calls, checked, unchecked, extra = {}) => ({
   calls, checkedSteps: checked, uncheckedSteps: unchecked, deltas: {}, ...extra,
 });
 
-console.log('--- S1：同一工具 + 相同参数 + 相同结果 ---');
-{
-  const signals = createSignalState();
-  const args = { file_path: 'a.py' };
-  const result = ok('同样的输出');
-  const seq = [];
-  for (let i = 0; i < 8; i += 1) seq.push(flags(observeCall(signals, { tool: 'write', args, result }, BASE)));
-  check('连续 1–3 次不触发', seq.slice(0, 3), [[], [], []]);
-  check('第 4 次触发（默认阈值 4）', seq[3], ['s1:4']);
-  check('第 5–7 次不再触发', seq.slice(4, 7), [[], [], []]);
-  check('第 8 次再触发一次', seq[7], ['s1:8']);
-}
-{
-  const signals = createSignalState();
-  const args = { file_path: 'a.py' };
-  const seq = [];
-  for (let i = 0; i < 5; i += 1) seq.push(flags(observeCall(signals, { tool: 'write', args, result: ok(`输出 ${i}`) }, BASE)));
-  check('结果每次都不同则不触发', seq, [[], [], [], [], []]);
-}
-{
-  const signals = createSignalState();
-  const result = ok('同一输出');
-  const variants = [{ file_path: 'a.py', offset: 1 }, { offset: 1, file_path: 'a.py' }];
-  const seq = [];
-  for (let i = 0; i < 4; i += 1) seq.push(flags(observeCall(signals, { tool: 'read', args: variants[i % 2], result }, BASE)));
-  check('参数键序不同仍算同一次调用', seq[3], ['s1:4']);
-}
-{
-  const signals = createSignalState();
-  const result = ok('同一输出');
-  const args = { file_path: 'a.py' };
-  const seq = [];
-  for (let i = 0; i < 5; i += 1) seq.push(flags(observeCall(signals, { tool: 'write', args, result }, { ...BASE, s1Repeats: 6 })));
-  check('阈值 6 时第 5 次不触发', seq[4], []);
-  check('阈值 6 时第 6 次触发', flags(observeCall(signals, { tool: 'write', args, result }, { ...BASE, s1Repeats: 6 })), ['s1:6']);
-}
+const SAT = { ...BASE, s6RoamCalls: 12 };
 
-console.log('\n--- S2：两组"工具+参数"来回交替 ---');
-const callA = { tool: 'write', args: { file_path: 'a.py' }, result: ok('a') };
-const callB = { tool: 'edit', args: { file_path: 'b.py' }, result: ok('b') };
+console.log('--- M1：信息饱和（取代 S1/S3/S6）---');
 {
+  // 同一结果重复：首次算新信息，之后 12 次没有新信息才饱和（第 13 次命中）
+  const signals = createSignalState();
+  const call = () => flags(observeCall(signals, { tool: 'ops_grep', args: { pattern: 'same' }, result: ok('同一份内容') }, SAT));
+  const seq = [];
+  for (let i = 0; i < 13; i += 1) seq.push(call());
+  check('前 12 次不报', seq.slice(0, 12).flat(), []);
+  check('第 13 次报 s6:12', seq[12], ['s6:12']);
+  const more = [];
+  for (let i = 0; i < 12; i += 1) more.push(call());
+  check('再满 12 次提醒一次（s6:24）', more.filter((item) => item.includes('s6:24')).length, 1);
+}
+{
+  // 只读调研：每次都是新内容 → 永远不饱和（旧 S6 会在这里误报）
   const signals = createSignalState();
   const seq = [];
-  for (let i = 0; i < 12; i += 1) seq.push(flags(observeCall(signals, i % 2 === 0 ? callA : callB, BASE)));
-  check('第 1–11 次不触发', seq.slice(0, 11).every((hit) => hit.length === 0), true);
-  check('第 12 次（6 轮）触发', seq[11], ['s2:6']);
-}
-{
-  const signals = createSignalState();
-  const seq = [callA, callB, callA, callA].map((call) => flags(observeCall(signals, call, BASE)));
-  check('A B A A 不算严格交替', seq, [[], [], [], []]);
-}
-{
-  // 签名完全相同（只有结果不同，避免 S1 顺带命中）→ 不是交替
-  const signals = createSignalState();
-  const seq = [];
-  for (let i = 0; i < 5; i += 1) seq.push(flags(observeCall(signals, { tool: 'write', args: { file_path: 'a.py' }, result: ok(`a${i}`) }, BASE)));
-  check('同一签名连续不算交替', seq.every((hit) => hit.length === 0), true);
-}
-{
-  const signals = createSignalState();
-  const pattern = [callA, callB, callA, callB, callA, callB, callA, callB, callA, callB, callA, callA];
-  const seq = pattern.map((call) => flags(observeCall(signals, call, BASE)));
-  check('末尾被同一签名打断后不触发', hasSignal(seq, 's2'), false);
-}
-{
-  const signals = createSignalState();
-  const seq = [];
-  for (let i = 0; i < 8; i += 1) seq.push(flags(observeCall(signals, i % 2 === 0 ? callA : callB, { ...BASE, s2Alternations: 4 })));
-  check('阈值 4 时第 6 次不触发', seq[5], []);
-  check('阈值 4 时第 8 次触发', seq[7], ['s2:4']);
-}
-{
-  // 交替被打断后，新的一段要按自己的阈值重新提醒，而不是要凑到 2 倍阈值。
-  const signals = createSignalState();
-  const breaker = { tool: 'read', args: { file_path: 'c.py' }, result: ok('c') };
-  const pattern = [callA, callB, callA, callB, breaker, callA, callB, callA, callB];
-  const seq = pattern.map((call) => flags(observeCall(signals, call, { ...BASE, s2Alternations: 2 })));
-  check('第一段第 4 次触发', seq[3], ['s2:2']);
-  check('中断后新一段第 4 次再次触发', seq[8], ['s2:2']);
-}
-
-console.log('\n--- S3：同一文件未修改被重复读取 ---');
-const file = path.join(SANDBOX, 'reread.txt');
-fs.writeFileSync(file, 'v1\n');
-/** 读一次 file（每次结果文本不同，避免 S1 顺带命中；要验 S1 交互的用例另写）。 */
-let reads = 0;
-const read = (signals, over = {}) => {
-  reads += 1;
-  return flags(observeCall(signals, {
-    tool: over.tool ?? 'read',
-    args: over.args ?? { file_path: file },
-    result: over.result ?? ok(`第 ${reads} 次读到的内容`),
-    cwd: SANDBOX,
-  }, BASE));
-};
-{
-  const signals = createSignalState();
-  const seq = [];
-  for (let i = 0; i < 6; i += 1) seq.push(read(signals));
-  check('前 2 次不触发', seq.slice(0, 2), [[], []]);
-  check('第 3 次触发（默认阈值 3）', seq[2], ['s3:3']);
-  check('第 4、5 次不再触发', seq.slice(3, 5), [[], []]);
-  check('第 6 次再触发一次', seq[5], ['s3:6']);
-}
-{
-  const signals = createSignalState();
-  read(signals);
-  read(signals);
-  fs.writeFileSync(file, 'v2 内容更长，大小也变了\n');
-  check('文件改过后不接着算', read(signals), []);
-  check('改过后第 2 次仍不触发', read(signals), []);
-  check('改过后重新数到第 3 次才触发', read(signals), ['s3:3']);
-}
-{
-  const signals = createSignalState();
-  let hit;
-  for (let i = 0; i < 3; i += 1) {
-    reads += 1;
-    hit = observeCall(signals, { tool: 'read', args: { file_path: 'reread.txt' }, result: ok(`相对路径第 ${reads} 次`), cwd: SANDBOX }, BASE).at(-1);
+  for (let i = 0; i < 20; i += 1) {
+    seq.push(flags(observeCall(signals, { tool: 'ops_grep', args: { pattern: `p${i}` }, result: ok(`新内容 ${i}`) }, SAT)));
   }
-  check('相对路径命中同一文件', hit?.path, 'reread.txt');
+  check('20 次只读新内容：一条提醒都没有', seq.flat(), []);
+  check('活跃序号为空', deviationDeltas(signals), {});
 }
 {
+  // 写文件 = 产物，把计数清零
   const signals = createSignalState();
-  const seq = [1, 2, 3].map(() => read(signals, { tool: 'ops_inspect_local_file', args: { path: file } }));
-  check('ops_inspect_local_file 也算读文件', seq[2], ['s3:3']);
+  const read = () => observeCall(signals, { tool: 'read', args: { file_path: 'a.txt' }, result: ok('同一份内容') }, SAT);
+  for (let i = 0; i < 12; i += 1) read();
+  check('写文件前计数为 11', signals.s6.count, 11);
+  observeCall(signals, { tool: 'write', args: { file_path: 'a.txt' }, result: ok('写了') }, SAT);
+  check('写文件把计数清零', signals.s6.count, 0);
 }
 {
+  // PLAN 勾选数前进同样是产物
   const signals = createSignalState();
-  const seq = [1, 2, 3].map(() => read(signals, { result: bad('读取失败') }));
-  check('读取失败不计数', seq, [[], [], []]);
-}
-{
-  const signals = createSignalState();
-  const seq = [1, 2, 3].map(() => read(signals, { tool: 'write' }));
-  check('写工具不计数', seq, [[], [], []]);
-}
-{
-  const signals = createSignalState();
-  const seq = [1, 2, 3].map(() => read(signals, { args: { file_path: path.join(SANDBOX, 'nope.txt') }, result: bad('不存在') }));
-  check('文件不存在不计数', seq, [[], [], []]);
-}
-{
-  const signals = createSignalState();
-  const seq = [1, 2, 3].map((i) => flags(observeCall(signals, { tool: 'read', args: { file_path: file }, result: ok(`无 cwd 第 ${i} 次`) }, BASE)));
-  check('没有会话工作区时不判 S3', seq, [[], [], []]);
-}
-{
-  // 真实交互：同一文件反复读到第 4 次，S3 先命中、S1 随后也命中（相同参数 + 相同结果）
-  const signals = createSignalState();
-  const seq = [];
-  for (let i = 0; i < 4; i += 1) seq.push(flags(observeCall(signals, { tool: 'read', args: { file_path: file }, result: ok('同一份内容'), cwd: SANDBOX }, BASE)));
-  check('重复读同一文件：第 3 次是 S3、第 4 次是 S1', [seq[2], seq[3]], [['s3:3'], ['s1:4']]);
+  const call = (i, checked) => observeCall(signals, {
+    tool: 'read', args: { file_path: 'a.txt' }, result: ok('同一份内容'), checkedSteps: checked, uncheckedSteps: 3 - checked, cwd: SANDBOX,
+  }, SAT);
+  for (let i = 0; i < 12; i += 1) call(i, 1);
+  check('12 次读同样内容后计数 11', signals.s6.count, 11);
+  call(12, 2);
+  check('PLAN 打勾推进把产物计数清零', signals.detectors.m1.sinceArtifact, 0);
+  check('有产物就不算饱和', signals.detectors.m1.saturated, false);
 }
 
-console.log('\n--- S4：PLAN.md 已打勾步骤数停滞 ---');
+console.log('--- M2：计划停滞 ---');
 {
   const signals = createSignalState();
-  let seq = 0;
-  const call = (steps) => {
-    seq += 1;
-    return flags(observeCall(signals, {
-      tool: 'write',
-      args: { file_path: `f${seq}.py` },
-      result: ok(`r${seq}`),
-      checkedSteps: steps,
-    }, BASE));
-  };
-  check('基线那次不算停滞', call(10), []);
-  check('连续 19 次未增加不触发', Array.from({ length: 19 }, () => call(10)).every((hit) => hit.length === 0), true);
-  check('第 20 次未增加触发', call(10), ['s4:20']);
-}
-{
-  const signals = createSignalState();
-  let seq = 0;
-  const call = (steps) => {
-    seq += 1;
-    return flags(observeCall(signals, {
-      tool: 'write',
-      args: { file_path: `g${seq}.py` },
-      result: ok(`s${seq}`),
-      checkedSteps: steps,
-    }, BASE));
-  };
-  check('基线', call(5), []);
-  check('5 次未增加不触发', Array.from({ length: 5 }, () => call(5)).every((hit) => hit.length === 0), true);
-  check('打勾数增加后不算停滞', call(6), []);
-  check('增加后要重新数满 20 次', Array.from({ length: 19 }, () => call(6)).every((hit) => hit.length === 0), true);
-  check('重新数满后触发', call(6), ['s4:20']);
-}
-{
-  const signals = createSignalState();
+  const call = (i) => observeCall(signals, {
+    tool: 'read', args: { file_path: 'a.txt' }, result: ok(`r${i}`), checkedSteps: 2, uncheckedSteps: 5, cwd: SANDBOX,
+  }, SAT);
   const seq = [];
-  for (let i = 0; i < 30; i += 1) {
-    seq.push(flags(observeCall(signals, { tool: 'write', args: { file_path: `h${i}.py` }, result: ok(`t${i}`) }, BASE)));
+  let s4hit;
+  for (let i = 1; i <= 21; i += 1) {
+    const hits = call(i);
+    if (i === 21) s4hit = hits.find((item) => item.signal === 's4');
+    seq.push(flags(hits));
   }
-  check('没有 PLAN.md（checkedSteps 缺省）时 S4 不触发', hasSignal(seq, 's4'), false);
+  check('前 20 次不报', seq.slice(0, 20).flat(), []);
+  check('第 21 次报 s4:20', seq[20], ['s4:20']);
+  check('s4 命中带计划步数', [s4hit?.count, s4hit?.checkedSteps], [20, 2]);
 }
 {
-  // 计划已全部勾完（planComplete）且没有 todo 进度源：没有应该继续增加的步骤，S4 不报停滞。
+  // 计划打勾前进 → 计数清零；之后再攒 20 次才再报
+  const signals = createSignalState();
+  const call = (i, checked) => flags(observeCall(signals, {
+    tool: 'read', args: { file_path: 'a.txt' }, result: ok(`r${i}`), checkedSteps: checked, uncheckedSteps: 5, cwd: SANDBOX,
+  }, SAT));
+  for (let i = 1; i <= 21; i += 1) call(i, 2);
+  check('先攒到停滞', signals.s4.count, 20);
+  call(22, 3);
+  check('计划前进后计数归零', signals.s4.count, 0);
+  check('计划前进后不报警', signals.s4.count < 20, true);
+}
+{
+  // 计划已完成：没有"应该继续增加"的步骤，不评估
+  const signals = createSignalState();
+  for (let i = 1; i <= 25; i += 1) {
+    observeCall(signals, { tool: 'read', args: { file_path: 'a.txt' }, result: ok(`r${i}`), checkedSteps: 5, uncheckedSteps: 0, planComplete: true }, SAT);
+  }
+  check('计划完成后不评估停滞', signals.s4.count, 0);
+}
+
+console.log('--- M3：无效循环 ---');
+{
   const signals = createSignalState();
   const seq = [];
-  for (let i = 0; i < 30; i += 1) {
+  for (let i = 1; i <= 12; i += 1) {
     seq.push(flags(observeCall(signals, {
-      tool: 'write',
-      args: { file_path: `done-${i}.py` },
-      result: ok(`done${i}`),
-      checkedSteps: 5,
-      uncheckedSteps: 0,
-      planComplete: true,
-    }, BASE)));
+      tool: 'read', args: { file_path: i % 2 === 0 ? 'a.txt' : 'b.txt' }, result: ok(`r${i}`),
+    }, SAT)));
   }
-  check('计划全部完成时 S4 不触发', hasSignal(seq, 's4'), false);
+  check('前 11 次不报', seq.slice(0, 11).flat(), []);
+  check('A/B 交替 6 轮报 s2:6', seq[11], ['s2:6']);
 }
 {
-  // 有 todo 快照时 S4 优先看 todo；PLAN.md 的进展也参与“是否推进”的判断。
+  // 交替期间写文件 → 清空窗口
   const signals = createSignalState();
-  let seq = 0;
-  const call = (completed) => {
-    seq += 1;
-    return flags(observeCall(signals, {
-      tool: 'write',
-      args: { file_path: `todo-s4-${seq}.py` },
-      result: ok(`u${seq}`),
-      todo: { completed, pending: 2, inProgress: 1 },
-    }, BASE));
-  };
-  check('todo 基线那次不算停滞', call(2), []);
-  check('todo 连续 19 次未增加不触发', Array.from({ length: 19 }, () => call(2)).every((hit) => hit.length === 0), true);
-  check('todo 第 20 次未增加触发', call(2), ['s4:20']);
-  check('todo 完成数增加后清零', call(3), []);
-}
-{
-  const signals = createSignalState();
-  let hits;
-  for (let i = 0; i < 21; i += 1) {
-    hits = observeCall(signals, {
-      tool: 'write',
-      args: { file_path: `todo-source-${i}.py` },
-      result: ok(`v${i}`),
-      todo: { completed: 1, pending: 2, inProgress: 0 },
-    }, BASE);
+  for (let i = 1; i <= 11; i += 1) {
+    observeCall(signals, { tool: 'read', args: { file_path: i % 2 ? 'a.txt' : 'b.txt' }, result: ok(`r${i}`) }, SAT);
   }
-  const s4 = hits.find((hit) => hit.signal === 's4');
-  check('todo 源的 S4 带 source 与 progress', [s4.source, s4.progress], ['todo', 1]);
-  check('todo 源的 S4 文案写明 todo 完成数', signalText(s4).includes('todo 清单完成数（1 条）'), true);
+  observeCall(signals, { tool: 'write', args: { file_path: 'c.txt' }, result: ok('w') }, SAT);
+  check('写文件清空交替窗口', signals.s2.count, 0);
 }
 {
-  // PLAN 在推进、todo 不动：任一源有进展都算推进，S4 不报停滞。
+  // 三个签名轮转不是乒乓
   const signals = createSignalState();
   const hits = [];
-  for (let i = 0; i < 25; i += 1) {
-    hits.push(flags(observeCall(signals, {
-      tool: 'read',
-      args: { file_path: `dual-${i}.txt` },
-      result: ok(`w${i}`),
-      checkedSteps: i,
-      uncheckedSteps: 5,
-      todo: { completed: 5, pending: 2, inProgress: 0 },
-      todoUsable: true,
-    }, BASE)));
+  for (let i = 1; i <= 15; i += 1) {
+    hits.push(...flags(observeCall(signals, {
+      tool: 'read', args: { file_path: `f${i % 3}.txt` }, result: ok(`r${i}`),
+    }, SAT)));
   }
-  check('PLAN 有进展、todo 不动时 S4 不触发', hasSignal(hits, 's4'), false);
+  check('三个签名轮转：不报 s2', hits.some((item) => item.startsWith('s2:')), false);
 }
-{
-  // 两个源都不动：仍然是停滞。
-  const signals = createSignalState();
-  const hits = [];
-  for (let i = 0; i < 25; i += 1) {
-    hits.push(flags(observeCall(signals, {
-      tool: 'read',
-      args: { file_path: `dual-stall-${i}.txt` },
-      result: ok(`x${i}`),
-      checkedSteps: 5,
-      uncheckedSteps: 5,
-      todo: { completed: 5, pending: 2, inProgress: 0 },
-      todoUsable: true,
-    }, BASE)));
-  }
-  check('两个源都不动时 S4 仍触发', hasSignal(hits, 's4'), true);
-}
-check('countCheckedSteps 只数已打勾的列表条目', countCheckedSteps([
-  '- [x] 已完成的步骤',
-  '- [ ] 未完成的步骤',
-  '* [X] 大小写都算',
-  '1. [x] 有序列表里的勾',
-  '  - [x] 缩进的子步骤',
-  '- [x]紧挨着没有空格',
-  '[x] 不是列表条目，不算',
-].join('\n')), 5);
-check('空文本 0 步', countCheckedSteps(''), 0);
 
-console.log('\n--- S6：漫游调用（没写文件、没推进计划）---');
-{
-  // 阈值压到 5，一个用例里能走完"触发 → 再满阈值再提醒"。
-  const S6 = { ...BASE, s6RoamCalls: 5 };
-  const signals = createSignalState();
-  const roam = (i, extra = {}) => flags(observeCall(signals, {
-    tool: 'read',
-    args: { file_path: `roam-${i}.txt` },
-    result: ok(`第 ${i} 次`),
-    ...extra,
-  }, S6));
-
-  const before = [];
-  for (let i = 0; i < 4; i += 1) before.push(roam(i));
-  check('S6 前 4 次不触发', hasSignal(before, 's6'), false);
-  check('S6 第 5 次触发', roam(4), ['s6:5']);
-  check('S6 文案写明漫游次数', signalText({ signal: 's6', count: 5, tool: 'read' }).includes('连续 5 次工具调用没有写入文件'), true);
-  check('S6 触发后活跃序号记进 active', typeof signals.active.s6 === 'number', true);
-  check('S6 计入偏离强度 D（wS6）', deviationDeltas(signals).s6, 0);
-  const between = [];
-  for (let i = 0; i < 4; i += 1) between.push(roam(5 + i));
-  check('S6 未再满阈值时不重复提醒', hasSignal(between, 's6'), false);
-  check('S6 第 10 次再提醒', roam(9), ['s6:10']);
-}
-{
-  // 清零条件 1：成功写文件。
-  const S6 = { ...BASE, s6RoamCalls: 3 };
-  const signals = createSignalState();
-  for (let i = 0; i < 2; i += 1) observeCall(signals, { tool: 'read', args: { file_path: `w${i}` }, result: ok(`a${i}`) }, S6);
-  observeCall(signals, { tool: 'write', args: { file_path: 'x.txt' }, result: ok('写出去了'), wrote: true }, S6);
-  check('成功写文件后 S6 清零', signals.s6.count, 0);
-  const after = [];
-  for (let i = 0; i < 2; i += 1) after.push(flags(observeCall(signals, { tool: 'read', args: { file_path: `w${i}b` }, result: ok(`b${i}`) }, S6)));
-  check('清零后要重新数满阈值', hasSignal(after, 's6'), false);
-}
-{
-  // 清零条件 2：失败写入不算清零。
-  const S6 = { ...BASE, s6RoamCalls: 3 };
-  const signals = createSignalState();
-  observeCall(signals, { tool: 'read', args: { file_path: 'f1' }, result: ok('a') }, S6);
-  observeCall(signals, { tool: 'read', args: { file_path: 'f2' }, result: ok('b') }, S6);
-  observeCall(signals, { tool: 'write', args: { file_path: 'x.txt' }, result: bad('被拒绝'), wrote: false }, S6);
-  check('失败的写入不清零 S6', signals.s6.count, 3);
-}
-{
-  // 清零条件 3：PLAN.md 打勾数变大。
-  const S6 = { ...BASE, s6RoamCalls: 3 };
-  const signals = createSignalState();
-  const step = (i, checked) => flags(observeCall(signals, {
-    tool: 'read', args: { file_path: `p${i}` }, result: ok(`p${i}`), checkedSteps: checked,
-  }, S6));
-  step(1, 2);
-  step(2, 2);
-  check('勾选数没变仍在累计', signals.s6.count, 2);
-  step(3, 3);
-  check('勾选数变大后 S6 清零', signals.s6.count, 0);
-}
-{
-  // 清零条件 4：todo 完成数变大。
-  const S6 = { ...BASE, s6RoamCalls: 3 };
-  const signals = createSignalState();
-  const item = (i, completed) => flags(observeCall(signals, {
-    tool: 'read',
-    args: { file_path: `t${i}` },
-    result: ok(`t${i}`),
-    todo: { completed, pending: 1, inProgress: 0 },
-  }, S6));
-  item(1, 1);
-  item(2, 1);
-  check('todo 完成数没变仍在累计', signals.s6.count, 2);
-  item(3, 2);
-  check('todo 完成数变大后 S6 清零', signals.s6.count, 0);
-}
-{
-  // 没有 PLAN.md（checkedSteps 缺省）时 S6 照常生效——这是与 S4 的关键区别。
-  const S6 = { ...BASE, s6RoamCalls: 3 };
+console.log('--- 交接收益比 R 仍然参与判定 ---');{
+  // 高上下文 + 饱和：同一次调用里同时命中 S6 与 R
   const signals = createSignalState();
   const seq = [];
-  for (let i = 0; i < 3; i += 1) {
-    seq.push(flags(observeCall(signals, { tool: 'read', args: { file_path: `n${i}` }, result: ok(`n${i}`) }, S6)));
-  }
-  check('没有 PLAN.md 时 S6 照常触发', hasSignal(seq, 's6'), true);
-}
-{
-  // 一直写文件就不会漫游。
-  const S6 = { ...BASE, s6RoamCalls: 3 };
-  const signals = createSignalState();
-  const seq = [];
-  for (let i = 0; i < 6; i += 1) {
+  for (let i = 1; i <= 13; i += 1) {
     seq.push(flags(observeCall(signals, {
-      tool: 'write', args: { file_path: `w${i}.txt` }, result: ok(`w${i}`), wrote: true,
-    }, S6)));
+      tool: 'read', args: { file_path: 'a.txt' }, result: ok('同一份'), contextTokens: 200000,
+    }, SAT)));
   }
-  check('连续写文件不触发 S6', hasSignal(seq, 's6'), false);
+  check('高上下文时每次调用都命中 R', seq[0], ['r:1']);
+  check('第 13 次同时命中 S6 与 R', [seq[12].includes('s6:12'), seq[12].includes('r:13')], [true, true]);
+  check('R 的构成留给 /drift', [Math.round(signals.ratio.C), Math.round(signals.ratio.N), signals.ratio.R > 1], [200000, 20, true]);
+}
+{
+  // 生产路径的 D 来自 score 的去重汇总；报告用的 Δ 取每个机理保留的那个信号
+  const signals = createSignalState();
+  for (let i = 1; i <= 13; i += 1) {
+    observeCall(signals, { tool: 'read', args: { file_path: 'a.txt' }, result: ok('同一份') }, SAT);
+  }
+  check('D 等于 M1 的贡献（wS6 = 1、Δ = 0）', round(signals.ratio.D), 1);
+  check('报告用的 Δ 来自保留的信号', signals.ratio.deltas, { s6: 0 });
 }
 
 console.log('\n--- R：读不到 token 计量时按"调用次数 × 每次估算 token"折算 ---');
@@ -517,18 +269,18 @@ console.log('\n--- R：读不到 token 计量时按"调用次数 × 每次估算
 
 console.log('\n--- R：偏离强度 D 参与判定 ---');
 {
-  // 同样的上下文规模与调用次数：S1 打转的那一次通过 D 项把 R 抬高
-  const settings = { ...BASE, s1Repeats: 2, cooldownCalls: 99 };
+  // 同样的上下文规模与调用次数：饱和（M1）的那一组通过 D 项把 R 抬高
+  const settings = { ...BASE, s6RoamCalls: 12, cooldownCalls: 99 };
   const spiral = createSignalState();
-  observeCall(spiral, { tool: 'write', args: { file_path: 'same.py' }, result: ok('same'), contextTokens: 100000 }, settings);
-  observeCall(spiral, { tool: 'write', args: { file_path: 'same.py' }, result: ok('same'), contextTokens: 100000 }, settings);
   const clean = createSignalState();
-  observeCall(clean, { tool: 'write', args: { file_path: 'a.py' }, result: ok('A'), contextTokens: 100000 }, settings);
-  observeCall(clean, { tool: 'write', args: { file_path: 'b.py' }, result: ok('B'), contextTokens: 100000 }, settings);
-  check('S1 打转时 D = S1 的权重（Δ = 0）', round(spiral.ratio.D), 0.5);
-  check('没有打转时 D = 0', clean.ratio.D, 0);
+  for (let i = 1; i <= 13; i += 1) {
+    observeCall(spiral, { tool: 'read', args: { file_path: 'a.txt' }, result: ok('同一份'), contextTokens: 100000 }, settings);
+    observeCall(clean, { tool: 'read', args: { file_path: `f${i}.txt` }, result: ok(`r${i}`), contextTokens: 100000 }, settings);
+  }
+  check('饱和时 D = S6 的权重（Δ = 0）', round(spiral.ratio.D), 1);
+  check('没有饱和时 D = 0', clean.ratio.D, 0);
   check('D 项把 R 抬高', spiral.ratio.R > clean.ratio.R, true);
-  check('R 的构成里带着各分量的 Δ', spiral.ratio.deltas, { s1: 0 });
+  check('R 的构成里带着各分量的 Δ', spiral.ratio.deltas, { s6: 0 });
 }
 {
   // 硬上限：计划全部打勾（N = 0）且没有打转（D = 0）时 R = 0，全靠上限兜底
@@ -594,18 +346,6 @@ console.log('\n--- R：参数非法时 R 不参与判定、但硬上限独立兜
     return [r.invalid, r.C, r.capped, r.trigger];
   })(), [true, 0, false, false]);
   check('参数全合法时硬上限仍按配置走', handoffRatio({ tokens: 300000, calls: 1, deltas: {}, settings: { handoffRatio: { capTokens: 250000 } } }).capped, true);
-}
-
-console.log('\n--- 一次调用命中多个信号 ---');
-{
-  const signals = createSignalState();
-  const multi = path.join(SANDBOX, 'multi.txt');
-  fs.writeFileSync(multi, 'm\n');
-  const settings = { ...BASE, cooldownCalls: 99 };
-  const readMulti = (i) => flags(observeCall(signals, { tool: 'read', args: { file_path: multi }, result: ok(`m${i}`), cwd: SANDBOX, contextTokens: 200000 }, settings));
-  readMulti(1);
-  readMulti(2);
-  check('第 3 次读取同时命中 S3 与 R', readMulti(3), ['s3:3', 'r:3']);
 }
 
 console.log('\n--- 规则 3 阈值可配置（默认行为由 smoke.mjs 固定）---');
@@ -735,39 +475,25 @@ check('分母类键小于下界时退回默认值', resolveConfig({ handoffRatio
 check('非数字的键退回默认值', resolveConfig({ handoffRatio: { r: '0.2', l: null, defaultN: Number.NaN } }).handoffRatio, DEFAULTS.handoffRatio);
 check('handoffRatio 不是对象时整体退回默认值', resolveConfig({ handoffRatio: [1, 2] }).handoffRatio, DEFAULTS.handoffRatio);
 
-console.log('\n--- R 的活跃序号簿记（Δcallsᵢ）---');
+console.log('\n--- active 簿记（Δcallsᵢ）：新判定下的衰减基准 ---');
 {
   const signals = createSignalState();
-  const call = () => observeCall(signals, { tool: 'write', args: { file_path: 'x.py' }, result: ok('同一个结果') }, BASE);
-  call(); call(); call();
-  check('条件未成立时不记录活跃序号', deviationDeltas(signals), {});
+  const call = () => observeCall(signals, { tool: 'read', args: { file_path: 'a.txt' }, result: ok('同一份') }, SAT);
+  for (let i = 0; i < 3; i += 1) call();
+  check('未饱和时不记录活跃序号', deviationDeltas(signals), {});
+  for (let i = 0; i < 10; i += 1) call();
+  check('饱和后 Δ = 0', deviationDeltas(signals), { s6: 0 });
   call();
-  check('第 4 次命中 S1（阈值 4）后 Δ = 0', deviationDeltas(signals), { s1: 0 });
-  call();
-  check('条件持续成立期间 Δ 一直是 0', deviationDeltas(signals), { s1: 0 });
+  check('条件持续成立期间 Δ 一直是 0', deviationDeltas(signals), { s6: 0 });
 }
 {
   const signals = createSignalState();
-  const settings = { ...BASE, s1Repeats: 2 };
-  const same = () => observeCall(signals, { tool: 'write', args: { file_path: 'y.py' }, result: ok('r') }, settings);
-  same(); same();
-  check('S1 条件成立时 Δ = 0', deviationDeltas(signals), { s1: 0 });
-  observeCall(signals, { tool: 'write', args: { file_path: 'other.py' }, result: ok('r2') }, settings);
-  check('S1 计数被重置后 Δ 从 1 开始变大', deviationDeltas(signals), { s1: 1 });
-  observeCall(signals, { tool: 'write', args: { file_path: 'third.py' }, result: ok('r3') }, settings);
-  check('条件继续不成立时 Δ 继续变大', deviationDeltas(signals), { s1: 2 });
-}
-{
-  const signals = createSignalState();
-  const file = path.join(SANDBOX, 'active.txt');
-  fs.writeFileSync(file, 'a\n');
-  const readFile = () => observeCall(signals, { tool: 'read', args: { file_path: file }, result: ok('a'), cwd: SANDBOX }, BASE);
-  readFile(); readFile(); readFile();
-  check('S3 到阈值后 Δ = 0', deviationDeltas(signals), { s3: 0 });
-  observeCall(signals, { tool: 'write', args: { file_path: 'w.py' }, result: ok('w') }, BASE);
-  check('别的工具调用不给 S3 续命，Δ = 1', deviationDeltas(signals), { s3: 1 });
-  readFile();
-  check('再读同一个未修改的文件时 Δ 回到 0', deviationDeltas(signals), { s3: 0 });
+  const read = () => observeCall(signals, { tool: 'read', args: { file_path: 'a.txt' }, result: ok('同一份') }, SAT);
+  for (let i = 0; i < 13; i += 1) read();
+  observeCall(signals, { tool: 'read', args: { file_path: 'b.txt' }, result: ok('新内容') }, SAT);
+  check('新结果把饱和打断，Δ 从 1 开始', deviationDeltas(signals), { s6: 1 });
+  observeCall(signals, { tool: 'read', args: { file_path: 'c.txt' }, result: ok('更新的内容') }, SAT);
+  check('条件继续不成立时 Δ 继续变大', deviationDeltas(signals), { s6: 2 });
 }
 
 fs.rmSync(SANDBOX, { recursive: true, force: true });
